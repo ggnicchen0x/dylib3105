@@ -1,0 +1,29 @@
+# Environment variables and secrets
+.env
+*.env
+*.env.*
+
+# SQLite Database & Storage
+*.db
+*.db-wal
+*.db-shm
+auth_gateway.db
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Local dependencies & caches
+.local/
+.cache/
+venv/
+.venv/
+env/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini

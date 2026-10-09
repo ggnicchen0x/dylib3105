@@ -1,0 +1,160 @@
+name: Build & Package 3105 AuthGate IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "Authentication Backend API URL"
+        required: true
+        default: "http://fi9.bot-hosting.cloud:25808"
+
+jobs:
+  build:
+    name: Compile AuthGate & Package iOS IPA
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode Environment
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Compile AuthGate.dylib (Native Apple ARM64 iOS SDK)
+        run: |
+          mkdir -p build_output
+          xcrun -sdk iphoneos clang -target arm64-apple-ios14.0 -dynamiclib \
+            -Wall -O3 -fobjc-arc \
+            -framework Foundation -framework UIKit -framework Security -framework CoreGraphics \
+            -install_name @executable_path/AuthGate.dylib \
+            AuthGate/AuthGate.m \
+            -o build_output/AuthGate.dylib
+
+          ls -la build_output/AuthGate.dylib
+          file build_output/AuthGate.dylib
+          otool -L build_output/AuthGate.dylib
+
+      - name: Extract & Patch Target IPA
+        run: |
+          python3 -c "
+          import zipfile, os, plistlib, hashlib, struct, shutil
+
+          server_url = '${{ github.event.inputs.server_url }}' or 'http://fi9.bot-hosting.cloud:25808'
+          ipa_path = '3105.ipa'
+          work_dir = 'build_work'
+          
+          if os.path.exists(work_dir):
+              shutil.rmtree(work_dir)
+          os.makedirs(work_dir)
+
+          # Extract original IPA
+          with zipfile.ZipFile(ipa_path, 'r') as z:
+              z.extractall(work_dir)
+
+          app_dir = os.path.join(work_dir, 'Payload', '3105.app')
+
+          # 1. Clean up old cracked/foreign files
+          for junk in ['Assetssa.dylib', 'Assets.dylib.bak', 'SignedByEsign', 'AuthGate.dylib']:
+              p = os.path.join(app_dir, junk)
+              if os.path.exists(p):
+                  os.remove(p)
+                  print('Removed:', junk)
+
+          # 2. Restore clean unpatched 3105 binary if backup exists, else use 3105
+          bin_path = os.path.join(app_dir, '3105')
+          bak_path = os.path.join(app_dir, '3105.bak')
+          if os.path.exists(bak_path):
+              shutil.copy2(bak_path, bin_path)
+              os.remove(bak_path)
+              print('Restored clean binary from 3105.bak')
+
+          # 3. Inject LC_LOAD_DYLIB @executable_path/AuthGate.dylib into 3105 Mach-O header
+          with open(bin_path, 'rb') as f:
+              bdata = bytearray(f.read())
+
+          # Repurpose load command slot #61 at offset 0x1f00 (size 56)
+          new_cmd = struct.pack('<III', 0x0c, 56, 24) + b'\x00'*12 + b'@executable_path/AuthGate.dylib\x00'
+          bdata[0x1f00:0x1f00+56] = new_cmd
+
+          with open(bin_path, 'wb') as f:
+              f.write(bdata)
+          print('Injected LC_LOAD_DYLIB into 3105 binary.')
+
+          # 4. Copy newly compiled native AuthGate.dylib into app bundle
+          shutil.copy2('build_output/AuthGate.dylib', os.path.join(app_dir, 'AuthGate.dylib'))
+          print('Placed AuthGate.dylib in 3105.app')
+
+          # 5. Update Info.plist version metadata and LicenseAPIURL
+          plist_path = os.path.join(app_dir, 'Info.plist')
+          with open(plist_path, 'rb') as f:
+              pl = plistlib.load(f)
+
+          pl['CFBundleShortVersionString'] = '1.1.3'
+          pl['CFBundleVersion'] = '113'
+          pl['AppReleaseDisplayVersion'] = '1.1.3 Official Release'
+          pl['CFBundleDisplayName'] = '3105'
+          pl['CFBundleName'] = '3105'
+          pl['LicenseAPIURL'] = server_url
+          pl['AuthGateServerURL'] = server_url
+
+          with open(plist_path, 'wb') as f:
+              plistlib.dump(pl, f)
+          print(f'Updated Info.plist: Version=1.1.3, Server={server_url}')
+
+          # 6. Re-generate CodeResources file hashes
+          coderes_path = os.path.join(app_dir, '_CodeSignature', 'CodeResources')
+          cr = {
+              'files': {},
+              'files2': {},
+              'rules': {'^.*': True, '^.*\\.lproj/': {'optional': True, 'weight': 1000}, '^Base\\.lproj/': {'weight': 1010}, '^version\\.plist$': {'weight': 100}},
+              'rules2': {'^.*': True, '^.*\\.lproj/': {'optional': True, 'weight': 1000}, '^Base\\.lproj/': {'weight': 1010}, '^Info\\.plist$': {'omit': True, 'weight': 20}, '^PkgInfo$': {'omit': True, 'weight': 20}, '^embedded\\.mobileprovision$': {'weight': 20}, '^version\\.plist$': {'weight': 100}}
+          }
+
+          for root, dirs, files in os.walk(app_dir):
+              for file in files:
+                  full_p = os.path.join(root, file)
+                  rel_p = os.path.relpath(full_p, app_dir).replace('\\\\', '/')
+                  if rel_p.startswith('_CodeSignature'):
+                      continue
+                  with open(full_p, 'rb') as f:
+                      content = f.read()
+                  sha1_hash = hashlib.sha1(content).digest()
+                  sha256_hash = hashlib.sha256(content).digest()
+                  cr['files'][rel_p] = sha1_hash
+                  cr['files2'][rel_p] = {'hash': sha1_hash, 'hash2': sha256_hash}
+
+          with open(coderes_path, 'wb') as f:
+              plistlib.dump(cr, f)
+          print('Regenerated clean CodeResources.')
+
+          # 7. Package final IPA
+          out_ipa = '3105_v1.1.3_AuthGate.ipa'
+          if os.path.exists(out_ipa):
+              os.remove(out_ipa)
+
+          with zipfile.ZipFile(out_ipa, 'w', zipfile.ZIP_DEFLATED) as zipf:
+              for root, dirs, files in os.walk(work_dir):
+                  for file in files:
+                      full_path = os.path.join(root, file)
+                      arcname = os.path.relpath(full_path, work_dir)
+                      zipf.write(full_path, arcname)
+
+          print(f'Successfully created {out_ipa} ({os.path.getsize(out_ipa)} bytes)')
+          "
+
+      - name: Ad-Hoc Sign IPA Binary Components
+        run: |
+          codesign --force --deep --sign - build_output/AuthGate.dylib || true
+
+      - name: Upload AuthGate IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3105_v1.1.3_AuthGate_IPA
+          path: 3105_v1.1.3_AuthGate.ipa
+          retention-days: 14

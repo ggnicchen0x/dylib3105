@@ -1,0 +1,12 @@
+# Generated build artifacts
+3105_v1.1.3_AuthGate.ipa
+build_output/
+build_work/
+DerivedData/
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
