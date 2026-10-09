@@ -92,9 +92,10 @@ jobs:
 
           if os.path.exists('Aimdrag.3105'):
               shutil.copy2('Aimdrag.3105', os.path.join(app_dir, 'Aimdrag.3105'))
-              os.makedirs(os.path.join(app_dir, 'Patches'), exist_ok=True)
-              shutil.copy2('Aimdrag.3105', os.path.join(app_dir, 'Patches', 'Aimdrag.3105'))
-              print('Bundled Aimdrag.3105 into 3105.app')
+              for sub in ['Patches', 'Packages', 'PatchProjects']:
+                  os.makedirs(os.path.join(app_dir, sub), exist_ok=True)
+                  shutil.copy2('Aimdrag.3105', os.path.join(app_dir, sub, 'Aimdrag.3105'))
+              print('Bundled Aimdrag.3105 into 3105.app root and subdirectories')
 
           # 5. Update Info.plist version metadata and LicenseAPIURL
           plist_path = os.path.join(app_dir, 'Info.plist')

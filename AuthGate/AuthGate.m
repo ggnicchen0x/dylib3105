@@ -243,11 +243,31 @@
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
     
     NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *patchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
-    NSString *packagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
+    NSString *appSupportDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
     
-    [fm createDirectoryAtPath:patchesDir withIntermediateDirectories:YES attributes:nil error:nil];
-    [fm createDirectoryAtPath:packagesDir withIntermediateDirectories:YES attributes:nil error:nil];
+    // 3105 internal installed patch store directory (PatchProjectLibrary.packageRootURL)
+    NSString *installedPatchesDir = [appSupportDir stringByAppendingPathComponent:@"PatchProjects"];
+    NSString *installedAuthorCopiesDir = [installedPatchesDir stringByAppendingPathComponent:@".AuthorCopies"];
+    NSString *installedBackupsDir = [installedPatchesDir stringByAppendingPathComponent:@"Backups"];
+    NSString *altAppSupportDir = [appSupportDir stringByAppendingPathComponent:@"3105/PatchProjects"];
+    
+    NSString *docPatchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
+    NSString *docPackagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
+    NSString *docProjectsDir = [docDir stringByAppendingPathComponent:@"Projects"];
+    
+    NSArray *dirsToCreate = @[
+        installedPatchesDir,
+        installedAuthorCopiesDir,
+        installedBackupsDir,
+        altAppSupportDir,
+        docPatchesDir,
+        docPackagesDir,
+        docProjectsDir
+    ];
+    
+    for (NSString *d in dirsToCreate) {
+        [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    }
     
     NSMutableArray *searchPaths = [NSMutableArray arrayWithObject:bundlePath];
     NSString *bundlePatches = [bundlePath stringByAppendingPathComponent:@"Patches"];
@@ -261,19 +281,47 @@
             if ([file.pathExtension.lowercaseString isEqualToString:@"3105"]) {
                 NSString *src = [dir stringByAppendingPathComponent:file];
                 
-                NSString *dst1 = [docDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dst1]) {
-                    [fm copyItemAtPath:src toPath:dst1 error:nil];
+                // Target 1: Library/Application Support/PatchProjects (Primary Installed Patches Store)
+                NSString *dstInstalled = [installedPatchesDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstInstalled]) {
+                    [fm copyItemAtPath:src toPath:dstInstalled error:nil];
+                    NSLog(@"[AuthGate] Installed patch to store: %@", dstInstalled);
                 }
                 
-                NSString *dst2 = [patchesDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dst2]) {
-                    [fm copyItemAtPath:src toPath:dst2 error:nil];
+                // Target 2: Library/Application Support/PatchProjects/.AuthorCopies
+                NSString *dstAuthor = [installedAuthorCopiesDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstAuthor]) {
+                    [fm copyItemAtPath:src toPath:dstAuthor error:nil];
                 }
                 
-                NSString *dst3 = [packagesDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dst3]) {
-                    [fm copyItemAtPath:src toPath:dst3 error:nil];
+                // Target 3: Library/Application Support/3105/PatchProjects
+                NSString *dstAlt = [altAppSupportDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstAlt]) {
+                    [fm copyItemAtPath:src toPath:dstAlt error:nil];
+                }
+                
+                // Target 4: Documents/Patches
+                NSString *dstPatches = [docPatchesDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstPatches]) {
+                    [fm copyItemAtPath:src toPath:dstPatches error:nil];
+                }
+                
+                // Target 5: Documents/Projects
+                NSString *dstProjects = [docProjectsDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstProjects]) {
+                    [fm copyItemAtPath:src toPath:dstProjects error:nil];
+                }
+                
+                // Target 6: Documents/Packages
+                NSString *dstPackages = [docPackagesDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstPackages]) {
+                    [fm copyItemAtPath:src toPath:dstPackages error:nil];
+                }
+                
+                // Target 7: Documents root
+                NSString *dstDoc = [docDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dstDoc]) {
+                    [fm copyItemAtPath:src toPath:dstDoc error:nil];
                 }
             }
         }
