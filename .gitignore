@@ -1,7 +1,9 @@
 # Generated build artifacts
-3105_v1.1.3_AuthGate.ipa
+*.ipa
+!3105.ipa
 build_output/
 build_work/
+backup_authgate/
 DerivedData/
 .DS_Store
 

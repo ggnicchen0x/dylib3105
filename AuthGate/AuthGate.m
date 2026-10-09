@@ -370,7 +370,7 @@
 }
 
 - (void)setupUI {
-    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.09 alpha:1.0]; // Deep Dark Solid
+    self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.04 blue:0.06 alpha:1.0]; // Deep Dark Obsidian
     
     // Tap to dismiss keyboard
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self.view action:@selector(endEditing:)];
@@ -379,31 +379,33 @@
     // Card Container
     _cardView = [[UIView alloc] init];
     _cardView.translatesAutoresizingMaskIntoConstraints = NO;
-    _cardView.backgroundColor = [UIColor colorWithRed:0.09 green:0.11 blue:0.16 alpha:0.98];
+    _cardView.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.11 alpha:0.98];
     _cardView.layer.cornerRadius = 24.0;
     _cardView.layer.borderWidth = 1.0;
-    _cardView.layer.borderColor = [UIColor colorWithRed:0.22 green:0.26 blue:0.38 alpha:0.5].CGColor;
+    _cardView.layer.borderColor = [UIColor colorWithRed:0.35 green:0.22 blue:0.16 alpha:0.55].CGColor;
     _cardView.layer.shadowColor = [UIColor blackColor].CGColor;
-    _cardView.layer.shadowOpacity = 0.6;
-    _cardView.layer.shadowOffset = CGSizeMake(0, 10);
-    _cardView.layer.shadowRadius = 20.0;
+    _cardView.layer.shadowOpacity = 0.7;
+    _cardView.layer.shadowOffset = CGSizeMake(0, 12);
+    _cardView.layer.shadowRadius = 24.0;
     [self.view addSubview:_cardView];
     
     // Title
     _titleLabel = [[UILabel alloc] init];
     _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _titleLabel.text = @"3105";
+    _titleLabel.text = @"BYTE IOS";
     _titleLabel.textColor = [UIColor whiteColor];
-    _titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightHeavy];
+    _titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightHeavy];
     [_cardView addSubview:_titleLabel];
     
-    // Version Badge
+    // Version Badge - Warm Peach / Neon Amber Accent
     _versionBadge = [[UILabel alloc] init];
     _versionBadge.translatesAutoresizingMaskIntoConstraints = NO;
-    _versionBadge.text = [NSString stringWithFormat:@" v%@ ", AUTHGATE_VERSION];
-    _versionBadge.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
-    _versionBadge.backgroundColor = [UIColor colorWithRed:0.15 green:0.35 blue:0.25 alpha:0.4];
-    _versionBadge.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+    _versionBadge.text = @" 27 ";
+    _versionBadge.textColor = [UIColor colorWithRed:1.0 green:0.62 blue:0.40 alpha:1.0];
+    _versionBadge.backgroundColor = [UIColor colorWithRed:0.38 green:0.18 blue:0.08 alpha:0.55];
+    _versionBadge.layer.borderColor = [UIColor colorWithRed:1.0 green:0.62 blue:0.40 alpha:0.45].CGColor;
+    _versionBadge.layer.borderWidth = 1.0;
+    _versionBadge.font = [UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
     _versionBadge.layer.cornerRadius = 6.0;
     _versionBadge.layer.masksToBounds = YES;
     [_cardView addSubview:_versionBadge];
@@ -412,17 +414,17 @@
     _subtitleLabel = [[UILabel alloc] init];
     _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     _subtitleLabel.text = @"Subscription License Authentication";
-    _subtitleLabel.textColor = [UIColor colorWithRed:0.60 green:0.65 blue:0.75 alpha:1.0];
-    _subtitleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    _subtitleLabel.textColor = [UIColor colorWithRed:0.62 green:0.66 blue:0.75 alpha:1.0];
+    _subtitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     [_cardView addSubview:_subtitleLabel];
     
     // Input Container
     UIView *inputBox = [[UIView alloc] init];
     inputBox.translatesAutoresizingMaskIntoConstraints = NO;
-    inputBox.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.11 alpha:0.9];
+    inputBox.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.08 alpha:0.95];
     inputBox.layer.cornerRadius = 14.0;
     inputBox.layer.borderWidth = 1.0;
-    inputBox.layer.borderColor = [UIColor colorWithRed:0.25 green:0.30 blue:0.42 alpha:0.6].CGColor;
+    inputBox.layer.borderColor = [UIColor colorWithRed:0.32 green:0.22 blue:0.18 alpha:0.65].CGColor;
     [_cardView addSubview:inputBox];
     
     _keyField = [[UITextField alloc] init];
@@ -436,7 +438,7 @@
     _keyField.returnKeyType = UIReturnKeyDone;
     _keyField.delegate = self;
     _keyField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"BYTE-XXXX-XXXX-XXXX"
-                                                                      attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.4 alpha:1.0]}];
+                                                                      attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.35 alpha:1.0]}];
     [inputBox addSubview:_keyField];
     
     // Paste Button inside input box
@@ -444,19 +446,19 @@
     pasteBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [pasteBtn setTitle:@"Paste" forState:UIControlStateNormal];
     pasteBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
-    [pasteBtn setTitleColor:[UIColor colorWithRed:0.35 green:0.65 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
+    [pasteBtn setTitleColor:[UIColor colorWithRed:1.0 green:0.62 blue:0.40 alpha:1.0] forState:UIControlStateNormal];
     [pasteBtn addTarget:self action:@selector(pasteKeyFromClipboard) forControlEvents:UIControlEventTouchUpInside];
     [inputBox addSubview:pasteBtn];
     
-    // Activate Button
+    // Activate Button - Warm Glowing Peach Accent
     _activateButton = [UIButton buttonWithType:UIButtonTypeCustom];
     _activateButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _activateButton.backgroundColor = [UIColor colorWithRed:0.22 green:0.46 blue:0.96 alpha:1.0];
+    _activateButton.backgroundColor = [UIColor colorWithRed:0.98 green:0.50 blue:0.24 alpha:1.0];
     _activateButton.layer.cornerRadius = 14.0;
-    _activateButton.layer.shadowColor = [UIColor colorWithRed:0.22 green:0.46 blue:0.96 alpha:0.4].CGColor;
-    _activateButton.layer.shadowOpacity = 0.8;
+    _activateButton.layer.shadowColor = [UIColor colorWithRed:0.98 green:0.50 blue:0.24 alpha:0.45].CGColor;
+    _activateButton.layer.shadowOpacity = 0.85;
     _activateButton.layer.shadowOffset = CGSizeMake(0, 6);
-    _activateButton.layer.shadowRadius = 12.0;
+    _activateButton.layer.shadowRadius = 14.0;
     [_activateButton setTitle:@"ACTIVATE SUBSCRIPTION" forState:UIControlStateNormal];
     [_activateButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     _activateButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
@@ -472,7 +474,7 @@
     // Status Label
     _statusLabel = [[UILabel alloc] init];
     _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+    _statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0];
     _statusLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     _statusLabel.numberOfLines = 0;
     _statusLabel.textAlignment = NSTextAlignmentCenter;
@@ -482,7 +484,7 @@
     _discordButton = [UIButton buttonWithType:UIButtonTypeCustom];
     _discordButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_discordButton setTitle:@"💬 Join Discord Community / Buy Key" forState:UIControlStateNormal];
-    [_discordButton setTitleColor:[UIColor colorWithRed:0.45 green:0.55 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
+    [_discordButton setTitleColor:[UIColor colorWithRed:1.0 green:0.68 blue:0.48 alpha:1.0] forState:UIControlStateNormal];
     _discordButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     [_discordButton addTarget:self action:@selector(discordButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     [_cardView addSubview:_discordButton];
@@ -494,7 +496,7 @@
         [_cardView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
         
         [_titleLabel.topAnchor constraintEqualToAnchor:_cardView.topAnchor constant:28],
-        [_titleLabel.centerXAnchor constraintEqualToAnchor:_cardView.centerXAnchor constant:-30],
+        [_titleLabel.centerXAnchor constraintEqualToAnchor:_cardView.centerXAnchor constant:-25],
         
         [_versionBadge.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
         [_versionBadge.leadingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor constant:8],
@@ -608,7 +610,7 @@
     [_spinner startAnimating];
     _activateButton.enabled = NO;
     _activateButton.alpha = 0.7;
-    _statusLabel.textColor = [UIColor colorWithRed:0.60 green:0.75 blue:0.95 alpha:1.0];
+    _statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.75 blue:0.55 alpha:1.0];
     _statusLabel.text = @"Verifying with license server...";
     
     NSString *hwid = [AuthGateSecurity getDeviceHWID];
@@ -629,7 +631,7 @@
         self->_activateButton.alpha = 1.0;
         
         if (error || statusCode == 0) {
-            self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+            self->_statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0];
             self->_statusLabel.text = [NSString stringWithFormat:@"❌ (%ld) %@", (long)(error ? error.code : -1), error ? error.localizedDescription : @"Connection failed"];
             return;
         }
@@ -639,15 +641,15 @@
             NSString *token = json[@"token"] ?: @"SESSION_ACTIVE";
             [AuthGateSecurity saveLicenseKey:key sessionToken:token];
             
-            self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
-            self->_statusLabel.text = @"✓ Access Granted! Unlocking 3105...";
+            self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.88 blue:0.60 alpha:1.0];
+            self->_statusLabel.text = @"✓ Access Granted! Unlocking BYTE IOS...";
             
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self.onSuccess) self.onSuccess();
             });
         } else {
             NSString *errMsg = json[@"detail"] ?: (json[@"message"] ?: @"Invalid or expired license key.");
-            self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+            self->_statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0];
             self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", errMsg];
         }
     }];

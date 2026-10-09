@@ -103,11 +103,11 @@ jobs:
               pl = plistlib.load(f)
 
           pl['CFBundleIdentifier'] = 'com.yangjiii.3105'
-          pl['CFBundleShortVersionString'] = '1.1.3'
-          pl['CFBundleVersion'] = '113'
-          pl['AppReleaseDisplayVersion'] = '1.1.3 Official Release'
-          pl['CFBundleDisplayName'] = '3105'
-          pl['CFBundleName'] = '3105'
+          pl['CFBundleShortVersionString'] = '27.0'
+          pl['CFBundleVersion'] = '27'
+          pl['AppReleaseDisplayVersion'] = 'BYTE IOS 27 Official Release'
+          pl['CFBundleDisplayName'] = 'BYTE IOS'
+          pl['CFBundleName'] = 'BYTE IOS'
           pl['LicenseAPIURL'] = server_url
           pl['AuthGateServerURL'] = server_url
           pl['NSAppTransportSecurity'] = {
@@ -116,7 +116,7 @@ jobs:
 
           with open(plist_path, 'wb') as f:
               plistlib.dump(pl, f)
-          print(f'Updated Info.plist: Version=1.1.3, Server={server_url}, ATS=NSAllowsArbitraryLoads')
+          print(f'Updated Info.plist: DisplayName=BYTE IOS, Version=27, Server={server_url}, ATS=NSAllowsArbitraryLoads')
 
           # 6. Re-generate CodeResources file hashes
           coderes_path = os.path.join(app_dir, '_CodeSignature', 'CodeResources')
@@ -145,7 +145,7 @@ jobs:
           print('Regenerated clean CodeResources.')
 
           # 7. Package final IPA
-          out_ipa = '3105_v1.1.3_AuthGate.ipa'
+          out_ipa = 'BYTE_IOS_27_AuthGate.ipa'
           if os.path.exists(out_ipa):
               os.remove(out_ipa)
 
@@ -166,6 +166,6 @@ jobs:
       - name: Upload AuthGate IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3105_v1.1.3_AuthGate_IPA
-          path: 3105_v1.1.3_AuthGate.ipa
+          name: BYTE_IOS_27_AuthGate_IPA
+          path: BYTE_IOS_27_AuthGate.ipa
           retention-days: 14
