@@ -1,7 +1,7 @@
 //
 //  AuthGate.m
 //  3105 Subscription & Access Control Gatekeeper
-//  All-In-One Single-File Implementation with Scene-Aware Enforcement
+//  All-In-One Single-File Implementation with BSD Raw Socket Engine & Scene-Aware Enforcement
 //
 
 #import <Foundation/Foundation.h>
@@ -10,16 +10,24 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/utsname.h>
 #import <objc/runtime.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <arpa/inet.h>
+#import <netdb.h>
+#import <unistd.h>
+#import <fcntl.h>
 
 #define AUTHGATE_VERSION @"1.1.3"
-#define DEFAULT_SERVER_URL @"http://fi9.bot-hosting.cloud:25808"
+#define DEFAULT_SERVER_HOST @"fi9.bot-hosting.cloud"
+#define DEFAULT_SERVER_IP @"95.216.12.48"
+#define DEFAULT_SERVER_PORT 25808
 #define DISCORD_URL @"https://discord.gg/KPJzd42rme"
 #define KEYCHAIN_SERVICE @"com.authgate.session.service"
 #define KEYCHAIN_ACCOUNT_KEY @"com.authgate.license.key"
 #define KEYCHAIN_ACCOUNT_TOKEN @"com.authgate.session.token"
 #define KEYCHAIN_ACCOUNT_HWID @"com.authgate.device.hwid"
 
-#pragma mark - Keychain & Device Fingerprint Helper
+#pragma mark - Keychain, Device Fingerprint & BSD Socket Engine
 
 @interface AuthGateSecurity : NSObject
 + (NSString *)getDeviceHWID;
@@ -27,6 +35,10 @@
 + (nullable NSString *)getSavedLicenseKey;
 + (nullable NSString *)getSavedSessionToken;
 + (void)clearSession;
++ (void)rawSocketPostWithPath:(NSString *)path
+                     jsonBody:(NSString *)bodyJson
+                      timeout:(int)timeoutSec
+                   completion:(void (^)(NSInteger statusCode, NSDictionary * _Nullable jsonResp, NSError * _Nullable error))completion;
 @end
 
 @implementation AuthGateSecurity
@@ -114,17 +126,116 @@
     SecItemDelete((__bridge CFDictionaryRef)q2);
 }
 
-+ (NSURLSession *)authSession {
-    static NSURLSession *session = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        config.timeoutIntervalForRequest = 12.0;
-        config.timeoutIntervalForResource = 20.0;
-        config.allowsCellularAccess = YES;
-        session = [NSURLSession sessionWithConfiguration:config];
+#pragma mark - Direct BSD Socket HTTP Engine (Bypasses iOS Sandbox & ATS blocks)
+
++ (void)rawSocketPostWithPath:(NSString *)path
+                     jsonBody:(NSString *)bodyJson
+                      timeout:(int)timeoutSec
+                   completion:(void (^)(NSInteger statusCode, NSDictionary * _Nullable jsonResp, NSError * _Nullable error))completion {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSArray<NSString *> *targetHosts = @[DEFAULT_SERVER_IP, DEFAULT_SERVER_HOST];
+        int port = DEFAULT_SERVER_PORT;
+        NSError *lastErr = nil;
+        
+        for (NSString *host in targetHosts) {
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"socket() failed"}];
+                continue;
+            }
+            
+            struct timeval tv;
+            tv.tv_sec = timeoutSec;
+            tv.tv_usec = 0;
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+            
+            struct sockaddr_in serv_addr;
+            memset(&serv_addr, 0, sizeof(serv_addr));
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(port);
+            
+            int ptonRes = inet_pton(AF_INET, [host UTF8String], &serv_addr.sin_addr);
+            if (ptonRes <= 0) {
+                struct hostent *he = gethostbyname([host UTF8String]);
+                if (!he || !he->h_addr_list[0]) {
+                    close(sock);
+                    lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"DNS host resolution failed"}];
+                    continue;
+                }
+                memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
+            }
+            
+            if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+                close(sock);
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"TCP connect timeout/refused"}];
+                continue;
+            }
+            
+            NSString *httpReq = [NSString stringWithFormat:
+                @"POST %@ HTTP/1.1\r\n"
+                @"Host: %@:%d\r\n"
+                @"User-Agent: 3105-iOS/1.1.3\r\n"
+                @"Content-Type: application/json\r\n"
+                @"Accept: application/json\r\n"
+                @"Content-Length: %lu\r\n"
+                @"Connection: close\r\n\r\n%@",
+                path, DEFAULT_SERVER_HOST, port, (unsigned long)[bodyJson lengthOfBytesUsingEncoding:NSUTF8StringEncoding], bodyJson];
+            
+            const char *rawBuf = [httpReq UTF8String];
+            size_t total = strlen(rawBuf);
+            size_t sent = 0;
+            while (sent < total) {
+                ssize_t s = send(sock, rawBuf + sent, total - sent, 0);
+                if (s <= 0) break;
+                sent += s;
+            }
+            
+            NSMutableData *recvData = [NSMutableData data];
+            char inBuf[2048];
+            ssize_t r = 0;
+            while ((r = recv(sock, inBuf, sizeof(inBuf) - 1, 0)) > 0) {
+                [recvData appendBytes:inBuf length:r];
+            }
+            close(sock);
+            
+            NSString *respStr = [[NSString alloc] initWithData:recvData encoding:NSUTF8StringEncoding];
+            if (!respStr || respStr.length == 0) {
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-4 userInfo:@{NSLocalizedDescriptionKey: @"Empty response received"}];
+                continue;
+            }
+            
+            NSInteger statusCode = 0;
+            NSDictionary *jsonDict = nil;
+            NSRange delim = [respStr rangeOfString:@"\r\n\r\n"];
+            if (delim.location != NSNotFound) {
+                NSString *headers = [respStr substringToIndex:delim.location];
+                NSString *body = [respStr substringFromIndex:delim.location + 4];
+                NSArray *lines = [headers componentsSeparatedByString:@"\r\n"];
+                if (lines.count > 0) {
+                    NSArray *tokens = [lines[0] componentsSeparatedByString:@" "];
+                    if (tokens.count >= 2) {
+                        statusCode = [tokens[1] integerValue];
+                    }
+                }
+                if (body.length > 0) {
+                    NSData *bData = [body dataUsingEncoding:NSUTF8StringEncoding];
+                    if (bData) {
+                        jsonDict = [NSJSONSerialization JSONObjectWithData:bData options:0 error:nil];
+                    }
+                }
+            }
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(statusCode, jsonDict, nil);
+            });
+            return;
+        }
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(0, nil, lastErr ?: [NSError errorWithDomain:@"BSDNetwork" code:-1009 userInfo:@{NSLocalizedDescriptionKey: @"Network error: unable to reach license server"}]);
+        });
     });
-    return session;
 }
 
 @end
@@ -366,68 +477,31 @@
     _statusLabel.textColor = [UIColor colorWithRed:0.60 green:0.75 blue:0.95 alpha:1.0];
     _statusLabel.text = @"Checking saved license...";
     
-    NSArray<NSString *> *urls = @[
-        @"http://fi9.bot-hosting.cloud:25808/api/v1/auth/validate",
-        @"http://95.216.12.48:25808/api/v1/auth/validate"
-    ];
-    
     NSDictionary *body = @{
         @"token": savedToken,
         @"device_hash": [AuthGateSecurity getDeviceHWID],
         @"app_version": AUTHGATE_VERSION
     };
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSString *bodyJson = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
     
-    [self sendValidationWithBody:body candidateURLs:urls index:0];
-}
-
-- (void)sendValidationWithBody:(NSDictionary *)body candidateURLs:(NSArray<NSString *> *)urls index:(NSUInteger)idx {
-    if (idx >= urls.count) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_isAuthenticating = NO;
-            [self->_spinner stopAnimating];
-            self->_activateButton.enabled = YES;
+    [AuthGateSecurity rawSocketPostWithPath:@"/api/v1/auth/validate" jsonBody:bodyJson timeout:8 completion:^(NSInteger statusCode, NSDictionary * _Nullable json, NSError * _Nullable error) {
+        self->_isAuthenticating = NO;
+        [self->_spinner stopAnimating];
+        self->_activateButton.enabled = YES;
+        
+        if (statusCode == 200) {
+            self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
+            self->_statusLabel.text = @"✓ Subscription Active!";
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (self.onSuccess) self.onSuccess();
+            });
+        } else {
             [AuthGateSecurity clearSession];
             self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-            self->_statusLabel.text = @"Session validation offline. Please enter key.";
-        });
-        return;
-    }
-    
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urls[idx]]];
-    req.HTTPMethod = @"POST";
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 8.0;
-    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    
-    [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-        if (error || !data || !httpResp) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self sendValidationWithBody:body candidateURLs:urls index:idx + 1];
-            });
-            return;
+            self->_statusLabel.text = @"Session expired. Please enter license key.";
         }
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_isAuthenticating = NO;
-            [self->_spinner stopAnimating];
-            self->_activateButton.enabled = YES;
-            
-            if (httpResp.statusCode == 200) {
-                self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
-                self->_statusLabel.text = @"✓ Subscription Active!";
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (self.onSuccess) self.onSuccess();
-                });
-            } else {
-                [AuthGateSecurity clearSession];
-                self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-                self->_statusLabel.text = @"Session expired. Please enter license key.";
-            }
-        });
-    }] resume];
+    }];
 }
 
 - (void)activateButtonTapped {
@@ -455,75 +529,38 @@
         @"app_version": AUTHGATE_VERSION
     };
     
-    NSArray<NSString *> *urls = @[
-        @"http://fi9.bot-hosting.cloud:25808/api/v1/auth/login",
-        @"http://95.216.12.48:25808/api/v1/auth/login"
-    ];
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSString *bodyJson = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
     
-    [self sendAuthRequestWithBody:body candidateURLs:urls index:0 key:key lastError:nil];
-}
-
-- (void)sendAuthRequestWithBody:(NSDictionary *)body candidateURLs:(NSArray<NSString *> *)urls index:(NSUInteger)idx key:(NSString *)key lastError:(NSError *)lastErr {
-    if (idx >= urls.count) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_isAuthenticating = NO;
-            [self->_spinner stopAnimating];
-            self->_activateButton.enabled = YES;
-            self->_activateButton.alpha = 1.0;
-            
-            NSString *msg = @"Server unreachable.";
-            if (lastErr) {
-                msg = [NSString stringWithFormat:@"(%ld) %@", (long)lastErr.code, [lastErr localizedDescription]];
-            }
+    [AuthGateSecurity rawSocketPostWithPath:@"/api/v1/auth/login" jsonBody:bodyJson timeout:12 completion:^(NSInteger statusCode, NSDictionary * _Nullable json, NSError * _Nullable error) {
+        self->_isAuthenticating = NO;
+        [self->_spinner stopAnimating];
+        self->_activateButton.enabled = YES;
+        self->_activateButton.alpha = 1.0;
+        
+        if (error || statusCode == 0) {
             self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-            self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", msg];
-        });
-        return;
-    }
-    
-    NSString *urlString = urls[idx];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
-    req.HTTPMethod = @"POST";
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 12.0;
-    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    
-    [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-        if (error || !data || !httpResp) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self sendAuthRequestWithBody:body candidateURLs:urls index:idx + 1 key:key lastError:error];
-            });
+            self->_statusLabel.text = [NSString stringWithFormat:@"❌ (%ld) %@", (long)(error ? error.code : -1), error ? error.localizedDescription : @"Connection failed"];
             return;
         }
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_isAuthenticating = NO;
-            [self->_spinner stopAnimating];
-            self->_activateButton.enabled = YES;
-            self->_activateButton.alpha = 1.0;
+        BOOL success = (statusCode == 200 && json && ([json[@"success"] boolValue] || json[@"token"]));
+        if (success) {
+            NSString *token = json[@"token"] ?: @"SESSION_ACTIVE";
+            [AuthGateSecurity saveLicenseKey:key sessionToken:token];
             
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            BOOL success = (httpResp.statusCode == 200 && json && ([json[@"success"] boolValue] || json[@"token"]));
-            if (success) {
-                NSString *token = json[@"token"] ?: @"SESSION_ACTIVE";
-                [AuthGateSecurity saveLicenseKey:key sessionToken:token];
-                
-                self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
-                self->_statusLabel.text = @"✓ Access Granted! Unlocking 3105...";
-                
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (self.onSuccess) self.onSuccess();
-                });
-            } else {
-                NSString *errMsg = json[@"detail"] ?: (json[@"message"] ?: @"Invalid or expired license key.");
-                self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-                self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", errMsg];
-            }
-        });
-    }] resume];
+            self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
+            self->_statusLabel.text = @"✓ Access Granted! Unlocking 3105...";
+            
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (self.onSuccess) self.onSuccess();
+            });
+        } else {
+            NSString *errMsg = json[@"detail"] ?: (json[@"message"] ?: @"Invalid or expired license key.");
+            self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+            self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", errMsg];
+        }
+    }];
 }
 
 @end
