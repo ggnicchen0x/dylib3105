@@ -212,7 +212,7 @@
     _keyField.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
     _keyField.autocorrectionType = UITextAutocorrectionTypeNo;
     _keyField.spellCheckingType = UITextSpellCheckingTypeNo;
-    _keyField.returnKeyType = 内UITextFieldDelegate == NULL ? UIReturnKeyDone : UIReturnKeyDone;
+    _keyField.returnKeyType = UIReturnKeyDone;
     _keyField.delegate = self;
     _keyField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"BYTE-XXXX-XXXX-XXXX"
                                                                       attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.4 alpha:1.0]}];
@@ -242,8 +242,9 @@
     [_activateButton addTarget:self action:@selector(activateButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     [_cardView addSubview:_activateButton];
     
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    _spinner.color = [UIColor whiteColor];
     _spinner.hidesWhenStopped = YES;
     [_activateButton addSubview:_spinner];
     
@@ -261,7 +262,7 @@
     _discordButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_discordButton setTitle:@"💬 Join Discord Community / Buy Key" forState:UIControlStateNormal];
     [_discordButton setTitleColor:[UIColor colorWithRed:0.45 green:0.55 blue:0.95 alpha:1.0] forState:UIControlStateNormal];
-    _discordButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemiBold];
+    _discordButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     [_discordButton addTarget:self action:@selector(discordButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     [_cardView addSubview:_discordButton];
     
