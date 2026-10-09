@@ -1,7 +1,7 @@
 //
 //  AuthGate.m
 //  3105 Subscription & Access Control Gatekeeper
-//  All-In-One Single-File Implementation for GitHub Actions CI/CD Build
+//  All-In-One Single-File Implementation with Scene-Aware Enforcement
 //
 
 #import <Foundation/Foundation.h>
@@ -9,6 +9,7 @@
 #import <Security/Security.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/utsname.h>
+#import <objc/runtime.h>
 
 #define AUTHGATE_VERSION @"1.1.3"
 #define DEFAULT_SERVER_URL @"http://fi9.bot-hosting.cloud:25808"
@@ -119,6 +120,7 @@
 
 @interface AuthGateViewController : UIViewController <UITextFieldDelegate>
 @property (nonatomic, copy) void (^onSuccess)(void);
+- (void)startSilentValidationIfPossible;
 @end
 
 @implementation AuthGateViewController {
@@ -144,12 +146,17 @@
     }
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self startSilentValidationIfPossible];
+}
+
 - (UIStatusBarStyle)preferredStatusBarStyle {
     return UIStatusBarStyleLightContent;
 }
 
 - (void)setupUI {
-    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.09 alpha:1.0]; // Deep Dark
+    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.09 alpha:1.0]; // Deep Dark Solid
     
     // Tap to dismiss keyboard
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self.view action:@selector(endEditing:)];
@@ -335,6 +342,56 @@
     return YES;
 }
 
+- (void)startSilentValidationIfPossible {
+    NSString *savedToken = [AuthGateSecurity getSavedSessionToken];
+    NSString *savedKey = [AuthGateSecurity getSavedLicenseKey];
+    if (!savedToken || !savedKey || _isAuthenticating) return;
+    
+    _isAuthenticating = YES;
+    [_spinner startAnimating];
+    _activateButton.enabled = NO;
+    _statusLabel.textColor = [UIColor colorWithRed:0.60 green:0.75 blue:0.95 alpha:1.0];
+    _statusLabel.text = @"Checking saved license...";
+    
+    NSString *serverURL = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"LicenseAPIURL"] ?: DEFAULT_SERVER_URL;
+    NSString *valURL = [NSString stringWithFormat:@"%@/api/v1/auth/validate", [serverURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/ "]]];
+    
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:valURL]];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
+    req.timeoutInterval = 8.0;
+    
+    NSDictionary *body = @{
+        @"token": savedToken,
+        @"device_hash": [AuthGateSecurity getDeviceHWID],
+        @"app_version": AUTHGATE_VERSION
+    };
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_isAuthenticating = NO;
+            [self->_spinner stopAnimating];
+            self->_activateButton.enabled = YES;
+            
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            if (httpResp.statusCode == 200) {
+                self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
+                self->_statusLabel.text = @"✓ Subscription Active!";
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (self.onSuccess) self.onSuccess();
+                });
+            } else {
+                [AuthGateSecurity clearSession];
+                self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+                self->_statusLabel.text = @"Session expired. Please enter license key.";
+            }
+        });
+    }] resume];
+}
+
 - (void)activateButtonTapped {
     if (_isAuthenticating) return;
     
@@ -395,7 +452,7 @@
                 self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
                 self->_statusLabel.text = @"✓ Access Granted! Unlocking 3105...";
                 
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (self.onSuccess) self.onSuccess();
                 });
             } else {
@@ -413,13 +470,14 @@
 
 @interface AuthGateManager : NSObject
 + (instancetype)shared;
-- (void)start;
+- (void)enforceGate;
 - (void)dismissGate;
+@property (nonatomic, assign) BOOL isUnlocked;
+@property (nonatomic, strong, nullable) UIWindow *gateWindow;
 @end
 
 @implementation AuthGateManager {
-    UIWindow *_gateWindow;
-    BOOL _unlocked;
+    AuthGateViewController *_authVC;
 }
 
 + (instancetype)shared {
@@ -429,102 +487,147 @@
     return inst;
 }
 
-- (void)start {
-    if (_unlocked) return;
-    
-    // Check if valid token exists in Keychain
-    NSString *savedToken = [AuthGateSecurity getSavedSessionToken];
-    NSString *savedKey = [AuthGateSecurity getSavedLicenseKey];
-    
-    [self presentGateWindow];
-    
-    if (savedToken && savedKey) {
-        // Perform silent validation
-        NSString *serverURL = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"LicenseAPIURL"] ?: DEFAULT_SERVER_URL;
-        NSString *valURL = [NSString stringWithFormat:@"%@/api/v1/auth/validate", [serverURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/ "]]];
-        
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:valURL]];
-        req.HTTPMethod = @"POST";
-        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-        req.timeoutInterval = 10.0;
-        req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"token": savedToken, @"device_hash": [AuthGateSecurity getDeviceHWID], @"app_version": AUTHGATE_VERSION} options:0 error:nil];
-        
-        [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-            if (httpResp.statusCode == 200) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self dismissGate];
-                });
-            }
-        }] resume];
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _isUnlocked = NO;
     }
+    return self;
 }
 
-- (void)presentGateWindow {
-    if (_gateWindow) return;
+- (void)enforceGate {
+    if (self.isUnlocked) return;
     
-    UIWindowScene *scene = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]] && s.activationState == UISceneActivationStateForegroundActive) {
-                scene = (UIWindowScene *)s;
-                break;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.isUnlocked) return;
+        
+        UIWindowScene *activeScene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    if (ws.activationState == UISceneActivationStateForegroundActive) {
+                        activeScene = ws;
+                        break;
+                    }
+                    if (!activeScene) activeScene = ws;
+                }
             }
         }
-    }
-    
-    if (scene) {
-        _gateWindow = [[UIWindow alloc] initWithWindowScene:scene];
-    } else {
-        _gateWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    }
-    
-    _gateWindow.windowLevel = UIWindowLevelAlert + 1000.0;
-    AuthGateViewController *vc = [[AuthGateViewController alloc] init];
-    __weak typeof(self) weakSelf = self;
-    vc.onSuccess = ^{
-        [weakSelf dismissGate];
-    };
-    _gateWindow.rootViewController = vc;
-    _gateWindow.hidden = NO;
-    [_gateWindow makeKeyAndVisible];
+        
+        if (!self->_authVC) {
+            self->_authVC = [[AuthGateViewController alloc] init];
+            __weak typeof(self) weakSelf = self;
+            self->_authVC.onSuccess = ^{
+                [weakSelf dismissGate];
+            };
+        }
+        
+        // Recreate or attach gateWindow to active scene
+        if (@available(iOS 13.0, *)) {
+            if (activeScene) {
+                if (!self.gateWindow || self.gateWindow.windowScene != activeScene) {
+                    self.gateWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+                }
+            } else if (!self.gateWindow) {
+                self.gateWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            }
+        } else {
+            if (!self.gateWindow) {
+                self.gateWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            }
+        }
+        
+        if (self.gateWindow) {
+            self.gateWindow.windowLevel = UIWindowLevelAlert + 99999.0;
+            self.gateWindow.rootViewController = self->_authVC;
+            self.gateWindow.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.09 alpha:1.0];
+            self.gateWindow.hidden = NO;
+            [self.gateWindow makeKeyAndVisible];
+        }
+    });
 }
 
 - (void)dismissGate {
-    _unlocked = YES;
-    if (!_gateWindow) return;
+    self.isUnlocked = YES;
+    if (!self.gateWindow) return;
     
     [UIView animateWithDuration:0.4 animations:^{
-        self->_gateWindow.alpha = 0.0;
-        self->_gateWindow.transform = CGAffineTransformMakeScale(1.08, 1.08);
+        self.gateWindow.alpha = 0.0;
+        self.gateWindow.transform = CGAffineTransformMakeScale(1.08, 1.08);
     } completion:^(BOOL finished) {
-        self->_gateWindow.hidden = YES;
-        self->_gateWindow.rootViewController = nil;
-        self->_gateWindow = nil;
+        self.gateWindow.hidden = YES;
+        self.gateWindow.rootViewController = nil;
+        self.gateWindow = nil;
     }];
 }
 
 @end
 
-#pragma mark - Constructor & Lifecycle Hook
+#pragma mark - Method Swizzling for Guaranteed Enforcement
+
+static void (*orig_viewDidAppear)(id, SEL, BOOL);
+static void swizzled_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    orig_viewDidAppear(self, _cmd, animated);
+    if (![AuthGateManager shared].isUnlocked && ![self isKindOfClass:[AuthGateViewController class]]) {
+        [[AuthGateManager shared] enforceGate];
+    }
+}
+
+static void (*orig_makeKeyAndVisible)(id, SEL);
+static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
+    orig_makeKeyAndVisible(self, _cmd);
+    if (![AuthGateManager shared].isUnlocked && self != [AuthGateManager shared].gateWindow) {
+        [[AuthGateManager shared] enforceGate];
+    }
+}
+
+static void SwizzleMethod(Class cls, SEL origSel, IMP newImp, void (**origImpOut)(void)) {
+    Method m = class_getInstanceMethod(cls, origSel);
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        if (origImpOut) *origImpOut = (void (*)(void))orig;
+        method_setImplementation(m, newImp);
+    }
+}
+
+#pragma mark - Constructor & Lifecycle Hooks
 
 __attribute__((constructor))
 static void AuthGateInit(void) {
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification * _Nonnull note) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[AuthGateManager shared] start];
-        });
-    }];
+    // 1. Swizzle UIViewController viewDidAppear
+    SwizzleMethod([UIViewController class], @selector(viewDidAppear:), (IMP)swizzled_viewDidAppear, (void (**)(void))&orig_viewDidAppear);
     
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification * _Nonnull note) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[AuthGateManager shared] start];
-        });
-    }];
+    // 2. Swizzle UIWindow makeKeyAndVisible
+    SwizzleMethod([UIWindow class], @selector(makeKeyAndVisible), (IMP)swizzled_makeKeyAndVisible, (void (**)(void))&orig_makeKeyAndVisible);
+    
+    // 3. Register for all relevant system lifecycle notifications
+    NSArray *notifNames = @[
+        UIApplicationDidFinishLaunchingNotification,
+        @"UISceneWillConnectNotification",
+        @"UISceneDidActivateNotification",
+        UIWindowDidBecomeKeyNotification,
+        UIWindowDidBecomeVisibleNotification,
+        UIApplicationDidBecomeActiveNotification
+    ];
+    
+    for (NSString *name in notifNames) {
+        [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification * _Nonnull note) {
+            [[AuthGateManager shared] enforceGate];
+        }];
+    }
+    
+    // 4. Repeated check during initial boot
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[AuthGateManager shared] enforceGate];
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[AuthGateManager shared] enforceGate];
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[AuthGateManager shared] enforceGate];
+    });
 }
