@@ -397,7 +397,6 @@
     req.HTTPMethod = @"POST";
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"fi9.bot-hosting.cloud" forHTTPHeaderField:@"Host"];
     [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
     req.timeoutInterval = 8.0;
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
@@ -461,18 +460,23 @@
         @"http://95.216.12.48:25808/api/v1/auth/login"
     ];
     
-    [self sendAuthRequestWithBody:body candidateURLs:urls index:0 key:key];
+    [self sendAuthRequestWithBody:body candidateURLs:urls index:0 key:key lastError:nil];
 }
 
-- (void)sendAuthRequestWithBody:(NSDictionary *)body candidateURLs:(NSArray<NSString *> *)urls index:(NSUInteger)idx key:(NSString *)key {
+- (void)sendAuthRequestWithBody:(NSDictionary *)body candidateURLs:(NSArray<NSString *> *)urls index:(NSUInteger)idx key:(NSString *)key lastError:(NSError *)lastErr {
     if (idx >= urls.count) {
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_isAuthenticating = NO;
             [self->_spinner stopAnimating];
             self->_activateButton.enabled = YES;
             self->_activateButton.alpha = 1.0;
+            
+            NSString *msg = @"Server unreachable.";
+            if (lastErr) {
+                msg = [NSString stringWithFormat:@"(%ld) %@", (long)lastErr.code, [lastErr localizedDescription]];
+            }
             self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-            self->_statusLabel.text = @"❌ Server unreachable. Please verify Internet or VPN connection.";
+            self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", msg];
         });
         return;
     }
@@ -482,16 +486,15 @@
     req.HTTPMethod = @"POST";
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"fi9.bot-hosting.cloud" forHTTPHeaderField:@"Host"];
     [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 10.0;
+    req.timeoutInterval = 12.0;
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     
     [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
         if (error || !data || !httpResp) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self sendAuthRequestWithBody:body candidateURLs:urls index:idx + 1 key:key];
+                [self sendAuthRequestWithBody:body candidateURLs:urls index:idx + 1 key:key lastError:error];
             });
             return;
         }
