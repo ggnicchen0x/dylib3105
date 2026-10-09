@@ -238,6 +238,48 @@
     });
 }
 
++ (void)installBundledDefaultPatches {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+    
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *patchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
+    NSString *packagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
+    
+    [fm createDirectoryAtPath:patchesDir withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:packagesDir withIntermediateDirectories:YES attributes:nil error:nil];
+    
+    NSMutableArray *searchPaths = [NSMutableArray arrayWithObject:bundlePath];
+    NSString *bundlePatches = [bundlePath stringByAppendingPathComponent:@"Patches"];
+    if ([fm fileExistsAtPath:bundlePatches]) {
+        [searchPaths addObject:bundlePatches];
+    }
+    
+    for (NSString *dir in searchPaths) {
+        NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
+        for (NSString *file in files) {
+            if ([file.pathExtension.lowercaseString isEqualToString:@"3105"]) {
+                NSString *src = [dir stringByAppendingPathComponent:file];
+                
+                NSString *dst1 = [docDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dst1]) {
+                    [fm copyItemAtPath:src toPath:dst1 error:nil];
+                }
+                
+                NSString *dst2 = [patchesDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dst2]) {
+                    [fm copyItemAtPath:src toPath:dst2 error:nil];
+                }
+                
+                NSString *dst3 = [packagesDir stringByAppendingPathComponent:file];
+                if (![fm fileExistsAtPath:dst3]) {
+                    [fm copyItemAtPath:src toPath:dst3 error:nil];
+                }
+            }
+        }
+    }
+}
+
 @end
 
 #pragma mark - AuthGate View Controller (Full Native UI)
@@ -649,6 +691,7 @@
 
 - (void)dismissGate {
     self.isUnlocked = YES;
+    [AuthGateSecurity installBundledDefaultPatches];
     if (!self.gateWindow) return;
     
     [UIView animateWithDuration:0.4 animations:^{
@@ -694,6 +737,9 @@ static void SwizzleMethod(Class cls, SEL origSel, IMP newImp, void (**origImpOut
 
 __attribute__((constructor))
 static void AuthGateInit(void) {
+    // Install bundled default patches into Documents & Patches folders
+    [AuthGateSecurity installBundledDefaultPatches];
+    
     // 1. Swizzle UIViewController viewDidAppear
     SwizzleMethod([UIViewController class], @selector(viewDidAppear:), (IMP)swizzled_viewDidAppear, (void (**)(void))&orig_viewDidAppear);
     

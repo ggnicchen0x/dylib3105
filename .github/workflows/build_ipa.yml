@@ -90,6 +90,12 @@ jobs:
           shutil.copy2('build_output/AuthGate.dylib', os.path.join(app_dir, 'AuthGate.dylib'))
           print('Placed AuthGate.dylib in 3105.app')
 
+          if os.path.exists('Aimdrag.3105'):
+              shutil.copy2('Aimdrag.3105', os.path.join(app_dir, 'Aimdrag.3105'))
+              os.makedirs(os.path.join(app_dir, 'Patches'), exist_ok=True)
+              shutil.copy2('Aimdrag.3105', os.path.join(app_dir, 'Patches', 'Aimdrag.3105'))
+              print('Bundled Aimdrag.3105 into 3105.app')
+
           # 5. Update Info.plist version metadata and LicenseAPIURL
           plist_path = os.path.join(app_dir, 'Info.plist')
           with open(plist_path, 'rb') as f:
