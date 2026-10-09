@@ -95,6 +95,7 @@ jobs:
           with open(plist_path, 'rb') as f:
               pl = plistlib.load(f)
 
+          pl['CFBundleIdentifier'] = 'com.yangjiii.3105'
           pl['CFBundleShortVersionString'] = '1.1.3'
           pl['CFBundleVersion'] = '113'
           pl['AppReleaseDisplayVersion'] = '1.1.3 Official Release'

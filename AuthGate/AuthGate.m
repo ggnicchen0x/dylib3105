@@ -114,6 +114,24 @@
     SecItemDelete((__bridge CFDictionaryRef)q2);
 }
 
++ (NSURLSession *)authSession {
+    static NSURLSession *session = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+        config.timeoutIntervalForRequest = 20.0;
+        config.timeoutIntervalForResource = 30.0;
+        config.allowsCellularAccess = YES;
+        if (@available(iOS 13.0, *)) {
+            config.allowsConstrainedNetworkAccess = YES;
+            config.allowsExpensiveNetworkAccess = YES;
+            config.waitsForConnectivity = YES;
+        }
+        session = [NSURLSession sessionWithConfiguration:config];
+    });
+    return session;
+}
+
 @end
 
 #pragma mark - AuthGate View Controller (Full Native UI)
@@ -370,7 +388,7 @@
     };
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_isAuthenticating = NO;
             [self->_spinner stopAnimating];
@@ -425,10 +443,10 @@
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
     [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 15.0;
+    req.timeoutInterval = 20.0;
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_isAuthenticating = NO;
             [self->_spinner stopAnimating];
@@ -436,7 +454,14 @@
             self->_activateButton.alpha = 1.0;
             
             if (error || !data) {
-                NSString *errDesc = error ? [error localizedDescription] : @"Server unreachable";
+                NSString *errDesc = @"Server unreachable";
+                if (error) {
+                    if (error.code == -1009) {
+                        errDesc = @"No Internet connection. Check Wi-Fi or Cellular Data.";
+                    } else {
+                        errDesc = [error localizedDescription];
+                    }
+                }
                 self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
                 self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", errDesc];
                 return;
