@@ -436,8 +436,9 @@
             self->_activateButton.alpha = 1.0;
             
             if (error || !data) {
+                NSString *errDesc = error ? [error localizedDescription] : @"Server unreachable";
                 self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-                self->_statusLabel.text = @"Connection failed. Please check internet connection.";
+                self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", errDesc];
                 return;
             }
             

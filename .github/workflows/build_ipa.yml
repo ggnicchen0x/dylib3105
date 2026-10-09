@@ -102,10 +102,23 @@ jobs:
           pl['CFBundleName'] = '3105'
           pl['LicenseAPIURL'] = server_url
           pl['AuthGateServerURL'] = server_url
+          pl['NSAppTransportSecurity'] = {
+              'NSAllowsArbitraryLoads': True,
+              'NSAllowsArbitraryLoadsInWebContent': True,
+              'NSAllowsLocalNetworking': True,
+              'NSExceptionDomains': {
+                  'fi9.bot-hosting.cloud': {
+                      'NSExceptionAllowsInsecureHTTPLoads': True,
+                      'NSIncludesSubdomains': True,
+                      'NSTemporaryExceptionAllowsInsecureHTTPLoads': True,
+                      'NSTemporaryExceptionMinimumTLSVersion': 'TLSv1.0'
+                  }
+              }
+          }
 
           with open(plist_path, 'wb') as f:
               plistlib.dump(pl, f)
-          print(f'Updated Info.plist: Version=1.1.3, Server={server_url}')
+          print(f'Updated Info.plist: Version=1.1.3, Server={server_url}, ATS=NSAllowsArbitraryLoads')
 
           # 6. Re-generate CodeResources file hashes
           coderes_path = os.path.join(app_dir, '_CodeSignature', 'CodeResources')
