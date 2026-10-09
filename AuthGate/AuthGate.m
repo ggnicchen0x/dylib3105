@@ -118,15 +118,10 @@
     static NSURLSession *session = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-        config.timeoutIntervalForRequest = 20.0;
-        config.timeoutIntervalForResource = 30.0;
+        NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        config.timeoutIntervalForRequest = 12.0;
+        config.timeoutIntervalForResource = 20.0;
         config.allowsCellularAccess = YES;
-        if (@available(iOS 13.0, *)) {
-            config.allowsConstrainedNetworkAccess = YES;
-            config.allowsExpensiveNetworkAccess = YES;
-            config.waitsForConnectivity = YES;
-        }
         session = [NSURLSession sessionWithConfiguration:config];
     });
     return session;
@@ -371,30 +366,56 @@
     _statusLabel.textColor = [UIColor colorWithRed:0.60 green:0.75 blue:0.95 alpha:1.0];
     _statusLabel.text = @"Checking saved license...";
     
-    NSString *serverURL = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"LicenseAPIURL"] ?: DEFAULT_SERVER_URL;
-    NSString *valURL = [NSString stringWithFormat:@"%@/api/v1/auth/validate", [serverURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/ "]]];
-    
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:valURL]];
-    req.HTTPMethod = @"POST";
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 8.0;
+    NSArray<NSString *> *urls = @[
+        @"http://fi9.bot-hosting.cloud:25808/api/v1/auth/validate",
+        @"http://95.216.12.48:25808/api/v1/auth/validate"
+    ];
     
     NSDictionary *body = @{
         @"token": savedToken,
         @"device_hash": [AuthGateSecurity getDeviceHWID],
         @"app_version": AUTHGATE_VERSION
     };
+    
+    [self sendValidationWithBody:body candidateURLs:urls index:0];
+}
+
+- (void)sendValidationWithBody:(NSDictionary *)body candidateURLs:(NSArray<NSString *> *)urls index:(NSUInteger)idx {
+    if (idx >= urls.count) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_isAuthenticating = NO;
+            [self->_spinner stopAnimating];
+            self->_activateButton.enabled = YES;
+            [AuthGateSecurity clearSession];
+            self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+            self->_statusLabel.text = @"Session validation offline. Please enter key.";
+        });
+        return;
+    }
+    
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urls[idx]]];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"fi9.bot-hosting.cloud" forHTTPHeaderField:@"Host"];
+    [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
+    req.timeoutInterval = 8.0;
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     
     [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+        if (error || !data || !httpResp) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendValidationWithBody:body candidateURLs:urls index:idx + 1];
+            });
+            return;
+        }
+        
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_isAuthenticating = NO;
             [self->_spinner stopAnimating];
             self->_activateButton.enabled = YES;
             
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
             if (httpResp.statusCode == 200) {
                 self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
                 self->_statusLabel.text = @"✓ Subscription Active!";
@@ -435,41 +456,53 @@
         @"app_version": AUTHGATE_VERSION
     };
     
-    NSString *serverURL = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"LicenseAPIURL"] ?: DEFAULT_SERVER_URL;
-    NSString *loginURLStr = [NSString stringWithFormat:@"%@/api/v1/auth/login", [serverURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/ "]]];
+    NSArray<NSString *> *urls = @[
+        @"http://fi9.bot-hosting.cloud:25808/api/v1/auth/login",
+        @"http://95.216.12.48:25808/api/v1/auth/login"
+    ];
     
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:loginURLStr]];
+    [self sendAuthRequestWithBody:body candidateURLs:urls index:0 key:key];
+}
+
+- (void)sendAuthRequestWithBody:(NSDictionary *)body candidateURLs:(NSArray<NSString *> *)urls index:(NSUInteger)idx key:(NSString *)key {
+    if (idx >= urls.count) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_isAuthenticating = NO;
+            [self->_spinner stopAnimating];
+            self->_activateButton.enabled = YES;
+            self->_activateButton.alpha = 1.0;
+            self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
+            self->_statusLabel.text = @"❌ Server unreachable. Please verify Internet or VPN connection.";
+        });
+        return;
+    }
+    
+    NSString *urlString = urls[idx];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"fi9.bot-hosting.cloud" forHTTPHeaderField:@"Host"];
     [req setValue:@"3105-iOS/1.1.3" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 20.0;
+    req.timeoutInterval = 10.0;
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     
     [[[AuthGateSecurity authSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+        if (error || !data || !httpResp) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendAuthRequestWithBody:body candidateURLs:urls index:idx + 1 key:key];
+            });
+            return;
+        }
+        
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_isAuthenticating = NO;
             [self->_spinner stopAnimating];
             self->_activateButton.enabled = YES;
             self->_activateButton.alpha = 1.0;
             
-            if (error || !data) {
-                NSString *errDesc = @"Server unreachable";
-                if (error) {
-                    if (error.code == -1009) {
-                        errDesc = @"No Internet connection. Check Wi-Fi or Cellular Data.";
-                    } else {
-                        errDesc = [error localizedDescription];
-                    }
-                }
-                self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
-                self->_statusLabel.text = [NSString stringWithFormat:@"❌ %@", errDesc];
-                return;
-            }
-            
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            
             BOOL success = (httpResp.statusCode == 200 && json && ([json[@"success"] boolValue] || json[@"token"]));
             if (success) {
                 NSString *token = json[@"token"] ?: @"SESSION_ACTIVE";

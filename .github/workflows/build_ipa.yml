@@ -104,17 +104,7 @@ jobs:
           pl['LicenseAPIURL'] = server_url
           pl['AuthGateServerURL'] = server_url
           pl['NSAppTransportSecurity'] = {
-              'NSAllowsArbitraryLoads': True,
-              'NSAllowsArbitraryLoadsInWebContent': True,
-              'NSAllowsLocalNetworking': True,
-              'NSExceptionDomains': {
-                  'fi9.bot-hosting.cloud': {
-                      'NSExceptionAllowsInsecureHTTPLoads': True,
-                      'NSIncludesSubdomains': True,
-                      'NSTemporaryExceptionAllowsInsecureHTTPLoads': True,
-                      'NSTemporaryExceptionMinimumTLSVersion': 'TLSv1.0'
-                  }
-              }
+              'NSAllowsArbitraryLoads': True
           }
 
           with open(plist_path, 'wb') as f:
