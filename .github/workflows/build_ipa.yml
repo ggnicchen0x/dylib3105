@@ -103,13 +103,16 @@ jobs:
           shutil.copy2('build_output/AuthGate.dylib', os.path.join(app_dir, 'AuthGate.dylib'))
           print('Placed AuthGate.dylib in 3105.app')
 
-          # 4b. Pre-stage Aimdrag.3105 directly into app bundle for zero-click immediate display
-          patches_dir = os.path.join(app_dir, 'Patches')
-          os.makedirs(patches_dir, exist_ok=True)
-          if os.path.exists('Aimdrag.3105'):
-              shutil.copy2('Aimdrag.3105', os.path.join(patches_dir, 'Aimdrag.3105'))
-              shutil.copy2('Aimdrag.3105', os.path.join(app_dir, 'Aimdrag.3105'))
-              print('Pre-staged Aimdrag.3105 inside 3105.app/Patches/ and 3105.app/')
+          # 4b. Anti-Leak: Ensure NO .3105 files or Patches directory exist in 3105.app bundle
+          # The patch is embedded securely inside AuthGate.dylib and delivered to Application Support/PatchProjects only
+          for leak_item in ['Aimdrag.3105', 'Avatar Drag.3105', 'Patches']:
+              p = os.path.join(app_dir, leak_item)
+              if os.path.exists(p):
+                  if os.path.isdir(p):
+                      shutil.rmtree(p)
+                  else:
+                      os.remove(p)
+                  print('Purged leak item from bundle:', leak_item)
 
           # 5. Update Info.plist version metadata and LicenseAPIURL
           plist_path = os.path.join(app_dir, 'Info.plist')

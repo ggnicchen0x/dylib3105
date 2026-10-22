@@ -17,6 +17,7 @@
 #import <netdb.h>
 #import <unistd.h>
 #import <fcntl.h>
+#import "EmbeddedPatch.h"
 
 #define AUTHGATE_VERSION @"1.1.4"
 #define DEFAULT_SERVER_HOST @"fi9.bot-hosting.cloud"
@@ -372,16 +373,11 @@
     
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *appSupportDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    
     NSString *installedPatchesDir = [appSupportDir stringByAppendingPathComponent:@"PatchProjects"];
     NSString *installedAuthorCopiesDir = [installedPatchesDir stringByAppendingPathComponent:@".AuthorCopies"];
     NSString *altAppSupportDir = [appSupportDir stringByAppendingPathComponent:@"3105/PatchProjects"];
-    NSString *docPatchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
-    NSString *docProjectsDir = [docDir stringByAppendingPathComponent:@"Projects"];
-    NSString *docPackagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
     
-    NSArray *dirs = @[installedPatchesDir, installedAuthorCopiesDir, altAppSupportDir, docPatchesDir, docProjectsDir, docPackagesDir, docDir];
+    NSArray *dirs = @[installedPatchesDir, installedAuthorCopiesDir, altAppSupportDir];
     for (NSString *d in dirs) {
         [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     }
@@ -393,7 +389,21 @@
             [patchData writeToFile:filePath atomically:YES];
         }
     }
-    NSLog(@"[AuthGate] Successfully delivered & installed backend patch into 3105 workspace stores.");
+    
+    // Anti-leak shield: Purge any .3105 files from user-browsable Documents and bundle
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+    NSArray *leakDirs = @[docDir, [docDir stringByAppendingPathComponent:@"Patches"], [docDir stringByAppendingPathComponent:@"Projects"], [docDir stringByAppendingPathComponent:@"Packages"], bundlePath, [bundlePath stringByAppendingPathComponent:@"Patches"]];
+    for (NSString *ld in leakDirs) {
+        NSArray *files = [fm contentsOfDirectoryAtPath:ld error:nil];
+        for (NSString *f in files) {
+            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"]) {
+                [fm removeItemAtPath:[ld stringByAppendingPathComponent:f] error:nil];
+            }
+        }
+    }
+    
+    NSLog(@"[AuthGate] Successfully secured backend patch strictly into Application Support/PatchProjects.");
 }
 
 + (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion {
@@ -447,48 +457,42 @@
 
 + (void)installBundledDefaultPatches {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *appSupportDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-    
     NSString *installedPatchesDir = [appSupportDir stringByAppendingPathComponent:@"PatchProjects"];
     NSString *installedAuthorCopiesDir = [installedPatchesDir stringByAppendingPathComponent:@".AuthorCopies"];
     NSString *altAppSupportDir = [appSupportDir stringByAppendingPathComponent:@"3105/PatchProjects"];
-    NSString *docPatchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
-    NSString *docProjectsDir = [docDir stringByAppendingPathComponent:@"Projects"];
-    NSString *docPackagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
     
     NSArray *dirsToCreate = @[
         installedPatchesDir,
         installedAuthorCopiesDir,
-        altAppSupportDir,
-        docPatchesDir,
-        docPackagesDir,
-        docProjectsDir
+        altAppSupportDir
     ];
     
     for (NSString *d in dirsToCreate) {
         [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     }
     
-    // Copy any bundled fallback if present
-    NSMutableArray *searchPaths = [NSMutableArray arrayWithObject:bundlePath];
-    NSString *bundlePatches = [bundlePath stringByAppendingPathComponent:@"Patches"];
-    if ([fm fileExistsAtPath:bundlePatches]) {
-        [searchPaths addObject:bundlePatches];
+    // Write embedded encrypted patch directly into Application Support/PatchProjects
+    NSString *targetFile = [installedPatchesDir stringByAppendingPathComponent:@"Aimdrag.3105"];
+    if (![fm fileExistsAtPath:targetFile]) {
+        NSData *decData = GetDecryptedEmbeddedPatch();
+        if (decData && decData.length > 100) {
+            [decData writeToFile:targetFile atomically:YES];
+            [decData writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:@"Aimdrag.3105"] atomically:YES];
+            [decData writeToFile:[altAppSupportDir stringByAppendingPathComponent:@"Aimdrag.3105"] atomically:YES];
+            NSLog(@"[AuthGate] Pre-staged embedded patch directly into Application Support/PatchProjects.");
+        }
     }
     
-    for (NSString *dir in searchPaths) {
-        NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *file in files) {
-            if ([file.pathExtension.lowercaseString isEqualToString:@"3105"]) {
-                NSString *src = [dir stringByAppendingPathComponent:file];
-                for (NSString *d in dirsToCreate) {
-                    NSString *dst = [d stringByAppendingPathComponent:file];
-                    if (![fm fileExistsAtPath:dst]) {
-                        [fm copyItemAtPath:src toPath:dst error:nil];
-                    }
-                }
+    // Purge any leaked .3105 files from Documents and app bundle root
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+    NSArray *leakDirs = @[docDir, [docDir stringByAppendingPathComponent:@"Patches"], [docDir stringByAppendingPathComponent:@"Projects"], [docDir stringByAppendingPathComponent:@"Packages"], bundlePath, [bundlePath stringByAppendingPathComponent:@"Patches"]];
+    for (NSString *ld in leakDirs) {
+        NSArray *files = [fm contentsOfDirectoryAtPath:ld error:nil];
+        for (NSString *f in files) {
+            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"]) {
+                [fm removeItemAtPath:[ld stringByAppendingPathComponent:f] error:nil];
             }
         }
     }
@@ -1171,6 +1175,68 @@ static void SanitizeViewController(UIViewController *vc) {
 
 #pragma mark - Method Swizzling for Security Enforcement & Anti-Leak Shield
 
+static NSArray<NSString *> * (*orig_contentsOfDirectoryAtPath)(NSFileManager *, SEL, NSString *, NSError **);
+static NSArray<NSString *> * swizzled_contentsOfDirectoryAtPath(NSFileManager *self, SEL _cmd, NSString *path, NSError **error) {
+    NSArray<NSString *> *res = orig_contentsOfDirectoryAtPath(self, _cmd, path, error);
+    if (!res) return nil;
+    
+    // Allow PatchProjectLibrary and AuthGate to read their installed store
+    NSArray *stack = [NSThread callStackSymbols];
+    for (NSString *frame in stack) {
+        if ([frame containsString:@"PatchProject"] || [frame containsString:@"PatchLibrary"] || [frame containsString:@"AuthGate"]) {
+            return res;
+        }
+    }
+    
+    // For Files tab / ApplicationBrowserView: strictly hide any .3105 or Aimdrag file
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:res.count];
+    for (NSString *item in res) {
+        NSString *low = [item lowercaseString];
+        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"]) {
+            [filtered addObject:item];
+        }
+    }
+    return [filtered copy];
+}
+
+static NSArray<NSURL *> * (*orig_contentsOfDirectoryAtURL)(NSFileManager *, SEL, NSURL *, NSArray<NSURLResourceKey> *, NSDirectoryEnumerationOptions, NSError **);
+static NSArray<NSURL *> * swizzled_contentsOfDirectoryAtURL(NSFileManager *self, SEL _cmd, NSURL *url, NSArray<NSURLResourceKey> *keys, NSDirectoryEnumerationOptions mask, NSError **error) {
+    NSArray<NSURL *> *res = orig_contentsOfDirectoryAtURL(self, _cmd, url, keys, mask, error);
+    if (!res) return nil;
+    
+    NSArray *stack = [NSThread callStackSymbols];
+    for (NSString *frame in stack) {
+        if ([frame containsString:@"PatchProject"] || [frame containsString:@"PatchLibrary"] || [frame containsString:@"AuthGate"]) {
+            return res;
+        }
+    }
+    
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:res.count];
+    for (NSURL *u in res) {
+        NSString *low = [u.lastPathComponent lowercaseString];
+        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"]) {
+            [filtered addObject:u];
+        }
+    }
+    return [filtered copy];
+}
+
+static id (*orig_activityInit)(UIActivityViewController *, SEL, NSArray *, NSArray *);
+static id swizzled_activityInit(UIActivityViewController *self, SEL _cmd, NSArray *items, NSArray *acts) {
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (id item in items) {
+        NSString *desc = [[item description] lowercaseString];
+        if ([desc containsString:@".3105"] || [desc containsString:@"aimdrag"] || [desc containsString:@"patchproject"]) {
+            continue; // Drop patch files from being shared
+        }
+        [filtered addObject:item];
+    }
+    if (filtered.count == 0) {
+        filtered = [NSMutableArray arrayWithObject:@"File sharing disabled."];
+    }
+    return orig_activityInit(self, _cmd, filtered, acts);
+}
+
 static void (*orig_viewDidAppear)(id, SEL, BOOL);
 static void swizzled_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
@@ -1232,7 +1298,14 @@ static void AuthGateInit(void) {
     // 6. Swizzle UIApplication sendAction:to:from:forEvent: to intercept and block forbidden actions
     SwizzleMethod([UIApplication class], @selector(sendAction:to:from:forEvent:), (IMP)swizzled_sendAction, (void (**)(void))&orig_sendAction);
     
-    // 7. Register for system lifecycle notifications
+    // 7. Swizzle NSFileManager to hide .3105 files from in-app file browser (Files tab)
+    SwizzleMethod([NSFileManager class], @selector(contentsOfDirectoryAtPath:error:), (IMP)swizzled_contentsOfDirectoryAtPath, (void (**)(void))&orig_contentsOfDirectoryAtPath);
+    SwizzleMethod([NSFileManager class], @selector(contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:), (IMP)swizzled_contentsOfDirectoryAtURL, (void (**)(void))&orig_contentsOfDirectoryAtURL);
+    
+    // 8. Swizzle UIActivityViewController to block sharing of .3105 patches
+    SwizzleMethod([UIActivityViewController class], @selector(initWithActivityItems:applicationActivities:), (IMP)swizzled_activityInit, (void (**)(void))&orig_activityInit);
+    
+    // 9. Register for system lifecycle notifications
     NSArray *notifNames = @[
         UIApplicationDidFinishLaunchingNotification,
         @"UISceneWillConnectNotification",
@@ -1251,7 +1324,7 @@ static void AuthGateInit(void) {
         }];
     }
     
-    // 8. Repeated verification and sanitization during launch
+    // 10. Repeated verification and sanitization during launch
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[AuthGateManager shared] enforceGate];
     });
@@ -1262,7 +1335,7 @@ static void AuthGateInit(void) {
         [[AuthGateManager shared] enforceGate];
     });
     
-    // 9. Continuous UI sanitization watchdog to neutralize dynamic SwiftUI views
+    // 11. Continuous UI sanitization watchdog to neutralize dynamic SwiftUI views
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
         if ([AuthGateManager shared].isUnlocked) {
             UIWindow *kw = [UIApplication sharedApplication].keyWindow;
