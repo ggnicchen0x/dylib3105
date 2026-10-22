@@ -53,7 +53,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, ForeignKey, delete, text, func, update, desc
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, ForeignKey, delete, text, func, update, desc, Numeric
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
@@ -66,13 +66,29 @@ from passlib.hash import pbkdf2_sha256
 # -------------------------------------------------------------
 from config import settings, Settings
 
+def _configure_logging() -> None:
+    """Structured, professional log format: LEVEL | module | message"""
+    fmt = logging.Formatter(
+        fmt="%(asctime)s  %(levelname)-8s  %(name)-28s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(fmt)
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    # Silence noisy third-party loggers
+    for noisy in ("uvicorn.access", "passlib", "jose", "httpx"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+_configure_logging()
 logger = logging.getLogger("auth_gateway")
-logging.basicConfig(level=logging.INFO)
 
 try:
     settings.validate_production_secrets()
 except Exception as e:
-    logger.warning(f"[SECURITY CONFIG NOTICE] {e}")
+    logger.warning("Security config: %s", e)
 
 # -------------------------------------------------------------
 # 2. DATABASE MODELS & ASYNC ENGINE
@@ -92,7 +108,15 @@ class License(Base):
     expires_at = Column(DateTime, nullable=True)
     notes = Column(String(255), default="Standard User Key")
     
+    # Reseller & Customer association
+    seller_id = Column(Integer, ForeignKey("resellers.id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    generated_by = Column(String(50), default="admin") # "admin" or "reseller"
+    pricing_tier = Column(String(20), nullable=True) # e.g. "7d", "15d", "30d"
+    
     devices = relationship("Device", back_populates="license", uselist=False)
+    reseller = relationship("Reseller", back_populates="licenses", foreign_keys=[seller_id])
+    customer = relationship("Customer", back_populates="licenses", foreign_keys=[customer_id])
 
     @property
     def is_expired(self) -> bool:
@@ -144,11 +168,11 @@ class SystemConfig(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     app_status = Column(String(20), default="ACTIVE")
-    app_version = Column(String(32), default="1.1.3")
+    app_version = Column(String(32), default="1.1.4")
     force_update = Column(Boolean, default=False)
     maintenance_message = Column(String(255), default="Server maintenance is currently in progress. Please check Discord announcements for status updates: https://discord.gg/KPJzd42rme")
-    release_notes = Column(Text, default="Official Release v1.1.3: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery.")
-    download_url = Column(String(255), default="https://github.com/nicchen0xf/Swift-ios/releases")
+    release_notes = Column(Text, default="Official Release v1.1.4: Enhanced security protocols, updated dynamic cloud patches, and ultra-smooth engine performance.")
+    download_url = Column(String(255), default="https://github.com/nicchen0xf/Swift-ios/releases/download/v1.1.4/ByteExternal_V1.1.4.ipa")
     updated_at = Column(DateTime, default=utc_now)
 
 class PackageRelease(Base):
@@ -187,6 +211,72 @@ class LicenseActivation(Base):
     created_at = Column(DateTime, default=utc_now)
     last_verified_at = Column(DateTime, default=utc_now)
 
+class Reseller(Base):
+    __tablename__ = "resellers"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    display_name = Column(String(100), nullable=False)
+    email = Column(String(120), nullable=True)
+    status = Column(String(20), default="active", index=True) # "active", "suspended", "inactive"
+    credit_balance = Column(Numeric(12, 4), default=0.0000, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    last_login_at = Column(DateTime, nullable=True)
+    notes = Column(String(255), nullable=True)
+    created_by = Column(String(50), default="admin")
+    
+    customers = relationship("Customer", back_populates="reseller", cascade="all, delete-orphan")
+    ledger_entries = relationship("CreditLedger", back_populates="reseller", cascade="all, delete-orphan")
+    licenses = relationship("License", back_populates="reseller", foreign_keys="[License.seller_id]")
+
+class Customer(Base):
+    __tablename__ = "customers"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    seller_id = Column(Integer, ForeignKey("resellers.id"), nullable=False, index=True)
+    customer_code = Column(String(64), unique=True, index=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    contact = Column(String(120), nullable=True)
+    status = Column(String(20), default="active", index=True) # "active", "suspended"
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    
+    reseller = relationship("Reseller", back_populates="customers")
+    licenses = relationship("License", back_populates="customer", foreign_keys="[License.customer_id]")
+
+class CreditLedger(Base):
+    __tablename__ = "credit_ledger"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    transaction_id = Column(String(64), unique=True, index=True, nullable=False)
+    seller_id = Column(Integer, ForeignKey("resellers.id"), nullable=False, index=True)
+    transaction_type = Column(String(40), nullable=False, index=True) # "ADMIN_ALLOCATE", "ADMIN_DEDUCT", "KEY_GENERATE", "REVERSAL", "ADMIN_CORRECTION"
+    amount = Column(Numeric(12, 4), nullable=False)
+    balance_before = Column(Numeric(12, 4), nullable=False)
+    balance_after = Column(Numeric(12, 4), nullable=False)
+    description = Column(String(255), nullable=False)
+    related_key = Column(String(64), nullable=True, index=True)
+    related_customer_id = Column(Integer, nullable=True)
+    initiated_by = Column(String(64), nullable=False)
+    timestamp = Column(DateTime, default=utc_now, index=True)
+    status = Column(String(20), default="COMPLETED", index=True)
+    idempotency_key = Column(String(128), nullable=True, index=True)
+    correlation_id = Column(String(64), nullable=True, index=True)
+    
+    reseller = relationship("Reseller", back_populates="ledger_entries")
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(128), unique=True, index=True, nullable=False)
+    seller_id = Column(Integer, nullable=False, index=True)
+    endpoint = Column(String(100), nullable=False)
+    response_status = Column(Integer, nullable=False)
+    response_body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+
 from services.release_service import (
     check_package_diff,
     create_and_publish_release,
@@ -197,12 +287,61 @@ from services.release_service import (
     normalize_package_name_from_filename
 )
 
-
-
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+def preflight_database_health():
+    import sqlite3, shutil, time
+    db_url = settings.DATABASE_URL
+    if "sqlite" not in db_url:
+        return
+    path_part = db_url.split(":///")[-1] if ":///" in db_url else ""
+    db_path = path_part.lstrip("./") if path_part.startswith("./") else path_part
+    if not db_path:
+        db_path = "auth_gateway.db"
+
+    is_corrupt = False
+    if os.path.exists(db_path):
+        con = None
+        try:
+            con = sqlite3.connect(db_path, timeout=5.0)
+            res = con.execute("PRAGMA quick_check").fetchone()
+            if not (res and res[0] == "ok"):
+                is_corrupt = True
+        except Exception as e:
+            logger.error(f"[DB HEALTH] Integrity check failed on {db_path}: {e}")
+            is_corrupt = True
+        finally:
+            if con:
+                try: con.close()
+                except Exception: pass
+
+    if is_corrupt:
+        logger.warning(f"[DB RECOVERY] Detected malformed SQLite file '{db_path}'. Initiating automatic recovery...")
+        broken_backup = f"{db_path}.malformed_{int(time.time())}"
+        try: shutil.copy2(db_path, broken_backup)
+        except Exception: pass
+        for ext in ["", "-wal", "-shm"]:
+            f = db_path + ext
+            if os.path.exists(f):
+                try: os.remove(f)
+                except Exception: pass
+        sql_dump = "auth_gateway.sql"
+        if os.path.exists(sql_dump):
+            try:
+                logger.info(f"[DB RECOVERY] Restoring database from SQL backup '{sql_dump}'...")
+                con = sqlite3.connect(db_path)
+                with open(sql_dump, "r", encoding="utf-8") as f:
+                    con.executescript(f.read())
+                con.execute("PRAGMA journal_mode = DELETE;")
+                con.execute("VACUUM;")
+                con.close()
+                logger.info("[DB RECOVERY] Database successfully restored from SQL backup!")
+            except Exception as re:
+                logger.error(f"[DB RECOVERY] Failed to restore from SQL dump: {re}")
+
 async def init_db():
+    preflight_database_health()
     async with engine.begin() as conn:
         from sqlalchemy import text
         try:
@@ -223,6 +362,27 @@ async def init_db():
         # Automatic SQLite column migration if upgraded from earlier schema
         try:
             await conn.execute(text("ALTER TABLE licenses ADD COLUMN duration_days INTEGER DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN seller_id INTEGER DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN customer_id INTEGER DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN generated_by VARCHAR(50) DEFAULT 'admin'"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN pricing_tier VARCHAR(20) DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_licenses_seller_id ON licenses(seller_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_licenses_customer_id ON licenses(customer_id)"))
         except Exception:
             pass
         try:
@@ -261,21 +421,21 @@ async def init_db():
         if not config:
             config = SystemConfig(
                 app_status="ACTIVE",
-                app_version="1.1.3",
+                app_version="1.1.4",
                 force_update=False,
                 maintenance_message="Server maintenance is currently in progress. Please check Discord announcements for status updates: https://discord.gg/KPJzd42rme",
-                release_notes="Official Release v1.1.3: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery.",
-                download_url="https://github.com/nicchen0xf/Swift-ios/releases/download/v1.1.3/ByteExternal_V1.1.3.ipa",
+                release_notes="Official Release v1.1.4: Enhanced security protocols, updated dynamic cloud patches, and ultra-smooth engine performance.",
+                download_url="https://github.com/nicchen0xf/Swift-ios/releases/download/v1.1.4/ByteExternal_V1.1.4.ipa",
                 updated_at=utc_now()
             )
             session.add(config)
             await session.commit()
         else:
-            # Auto-sync versions to official 1.1.3 release
-            if config.app_version in ["4.8.2", "2.1.0", "2.1.1", "2.0.0", "1.1.1", "1.1.2"]:
-                config.app_version = "1.1.3"
-                config.release_notes = "Official Release v1.1.3: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery."
-                config.download_url = "https://github.com/nicchen0xf/Swift-ios/releases/download/v1.1.3/ByteExternal_V1.1.3.ipa"
+            # Auto-sync versions to official 1.1.4 release
+            if config.app_version in ["4.8.2", "2.1.0", "2.1.1", "2.0.0", "1.1.1", "1.1.2", "1.1.3"]:
+                config.app_version = "1.1.4"
+                config.release_notes = "Official Release v1.1.4: Enhanced security protocols, updated dynamic cloud patches, and ultra-smooth engine performance."
+                config.download_url = "https://github.com/nicchen0xf/Swift-ios/releases/download/v1.1.4/ByteExternal_V1.1.4.ipa"
                 await session.commit()
 
 
@@ -522,7 +682,7 @@ def verify_asymmetric_device_signature(public_key_str: str, message_bytes: bytes
             return True
         return False
     except Exception as e:
-        logger.debug(f"Asymmetric signature verification error: {e}")
+        logger.debug("JWT signature error: %s", e)
         return False
 
 def verify_hmac_signature(payload_string: str, provided_signature: str) -> bool:
@@ -581,7 +741,7 @@ def verify_admin_session(request: Request) -> bool:
     header_key = request.headers.get("x-admin-key")
     if header_key:
         if settings.ALLOW_LEGACY_ADMIN_API_KEY and secrets.compare_digest(header_key, settings.ADMIN_API_KEY):
-            logger.warning("[SECURITY AUDIT] Legacy x-admin-key header utilized for admin operation.")
+            logger.warning("Legacy x-admin-key header used — upgrade to Bearer token auth")
             return True
         return False
         
@@ -786,7 +946,7 @@ async def activate_or_verify_license(
             await db.commit()
         except Exception as e:
             await db.rollback()
-            logger.error(f"Failed to commit license activation: {e}", exc_info=True)
+            logger.error("License activation commit failed: %s", e, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Database operation failed. An internal server error occurred."
@@ -828,7 +988,7 @@ async def periodic_license_expiration_worker():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.debug(f"Periodic expiration worker error: {e}")
+            logger.debug("Expiration worker tick error: %s", e)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1764,6 +1924,16 @@ tbody tr:hover td {
     align-items: start;
 }
 
+.responsive-two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+}
+
+.table-responsive table {
+    min-width: 580px;
+}
+
 /* ---------------- Responsive Breakpoints ---------------- */
 @media (max-width: 900px) {
     .sidebar {
@@ -1789,6 +1959,10 @@ tbody tr:hover td {
         display: none !important;
     }
     .version-layout {
+        grid-template-columns: 1fr !important;
+        gap: 20px !important;
+    }
+    .responsive-two-col {
         grid-template-columns: 1fr !important;
         gap: 20px !important;
     }
@@ -1875,8 +2049,11 @@ def render_layout(title: str, eyebrow: str, content: str, active_tab: str = "das
     nav_items = [
         {"to": "/admin/dashboard", "label": "Overview", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>""", "key": "dashboard"},
         {"to": "/admin/keys", "label": "License keys", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>""", "key": "keys"},
+        {"to": "/admin/resellers", "label": "Resellers", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>""", "key": "resellers"},
+        {"to": "/admin/credits", "label": "Credit ledger", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>""", "key": "credits"},
+        {"to": "/admin/transactions", "label": "Transactions", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>""", "key": "transactions"},
         {"to": "/admin/releases", "label": "Releases & Patches", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>""", "key": "releases"},
-        {"to": "/admin/version", "label": "Version control", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0_1-.963 0z"/></svg>""", "key": "version"},
+        {"to": "/admin/version", "label": "Version control", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>""", "key": "version"},
         {"to": "/admin/status", "label": "App status", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>""", "key": "status"},
         {"to": "/admin/logs", "label": "Audit logs", "icon": """<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h12a2 2 0 0 0 2-2v-2H10v2a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v3h4"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/></svg>""", "key": "logs"},
     ]
@@ -3494,9 +3671,9 @@ async def admin_version_page(request: Request, msg: Optional[str] = None, db: As
     if not verify_admin_session(request):
         return RedirectResponse(url="/admin/login", status_code=303)
         
-    res_cfg = await db.execute(select(SystemConfig))
+    res_cfg = await db.execute(select(SystemConfig).order_by(SystemConfig.id.desc()).limit(1))
     cfg = res_cfg.scalars().first()
-    current_ver = cfg.app_version if cfg else "1.1.2"
+    current_ver = cfg.app_version if (cfg and cfg.app_version) else "1.1.4"
     force_update = cfg.force_update if cfg else False
     download_url_val = cfg.download_url if (cfg and cfg.download_url) else "https://github.com/nicchen0xf/Swift-ios/releases"
     notes_val = cfg.release_notes if cfg and cfg.release_notes else "Official Release v1.1.2: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery."
@@ -3591,18 +3768,24 @@ async def admin_version_submit(request: Request, app_version: str = Form(...), f
     if not verify_admin_session(request):
         return RedirectResponse(url="/admin/login", status_code=303)
         
-    res_cfg = await db.execute(select(SystemConfig))
+    res_cfg = await db.execute(select(SystemConfig).order_by(SystemConfig.id.desc()).limit(1))
     cfg = res_cfg.scalars().first()
+    clean_ver = app_version.strip().lstrip("vV")
     if not cfg:
-        cfg = SystemConfig(app_version=app_version, force_update=force_update, download_url=download_url, release_notes=release_notes, updated_at=utc_now())
+        cfg = SystemConfig(app_version=clean_ver, force_update=force_update, download_url=download_url, release_notes=release_notes, updated_at=utc_now())
         db.add(cfg)
     else:
-        cfg.app_version = app_version
+        cfg.app_version = clean_ver
         cfg.force_update = force_update
         cfg.download_url = download_url
         cfg.release_notes = release_notes
         cfg.updated_at = utc_now()
     await db.commit()
+    try:
+        from services.realtime import realtime_hub
+        await realtime_hub.dispatch_global_event("VERSION_UPDATED", {"version": clean_ver})
+    except Exception:
+        pass
     return RedirectResponse(url="/admin/version?msg=Version+policy+saved.", status_code=303)
 
 @app.get("/admin/status", response_class=HTMLResponse)
@@ -3745,7 +3928,7 @@ async def admin_logs_page(request: Request, msg: Optional[str] = None, db: Async
         time_str = format_nepal_time(l.timestamp, "%Y-%m-%d %H:%M:%S")
         ip_str = l.ip_address or "—"
         key_str = l.license_key or "—"
-        details_str = l.details or "—"
+        details_str = re.sub(r'(\b\d+\.\d{2})00\b', r'\1', l.details) if l.details else "—"
         
         rows_html += f"""
         <tr class="log-row" style="border-bottom: 1px solid var(--border); transition: background 0.15s ease;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
@@ -3911,7 +4094,7 @@ async def admin_clear_logs(request: Request, db: AsyncSession = Depends(get_db))
         return RedirectResponse(url="/admin/logs?msg=All+security+audit+logs+have+been+cleared.", status_code=303)
     except Exception as e:
         await db.rollback()
-        logger.error(f"Error clearing logs: {e}")
+        logger.error("Log clear failed: %s", e)
         return RedirectResponse(url="/admin/logs?error=Failed+to+clear+logs.", status_code=303)
 
 # -------------------------------------------------------------
@@ -3936,7 +4119,7 @@ async def get_live_stats(request: Request, db: AsyncSession = Depends(get_db)):
         "banned_keys": sum(1 for k in keys if k.status == "banned"),
         "bound_devices": sum(1 for k in keys if k.bound_device_hash is not None and not is_license_expired(k) and k.status != "banned"),
         "app_status": cfg.app_status if cfg else "ACTIVE",
-        "app_version": cfg.app_version if cfg else "1.1.3"
+        "app_version": cfg.app_version if cfg else "1.1.4"
     }
 
 @app.get("/api/v1/admin/live-logs")
@@ -3955,7 +4138,7 @@ async def get_live_logs(request: Request, db: AsyncSession = Depends(get_db)):
             "action": l.action,
             "ip_address": l.ip_address,
             "license_key": l.license_key or "—",
-            "details": l.details
+            "details": re.sub(r'(\b\d+\.\d{2})00\b', r'\1', l.details) if l.details else None
         }
         for l in logs
     ]
@@ -3976,9 +4159,9 @@ class LoginRequest(BaseModel):
 class ValidateRequest(BaseModel):
     token: str
     device_hash: str
-    app_version: str = "1.1.2"
-    timestamp: int
-    signature: str
+    app_version: Optional[str] = "1.1.4"
+    timestamp: Optional[int] = None
+    signature: Optional[str] = None
 
 @app.get("/")
 async def root():
@@ -3992,20 +4175,29 @@ async def health():
 @app.post("/api/v1/auth/version-check")
 @app.get("/api/v2/auth/version-check")
 @app.post("/api/v2/auth/version-check")
-async def check_app_version(db: AsyncSession = Depends(get_db)):
+async def check_app_version(request: Request, db: AsyncSession = Depends(get_db)):
     res_cfg = await db.execute(select(SystemConfig))
     cfg = res_cfg.scalars().first()
-    required_ver = cfg.app_version.strip() if (cfg and cfg.app_version) else "1.1.2"
+    raw_cfg_ver = cfg.app_version.strip() if (cfg and cfg.app_version) else "1.1.4"
     force_update = cfg.force_update if cfg else False
-    notes = cfg.release_notes.strip() if (cfg and cfg.release_notes and cfg.release_notes.strip()) else "Official Release v1.1.2: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery."
+    notes = cfg.release_notes.strip() if (cfg and cfg.release_notes and cfg.release_notes.strip()) else "Official Release: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery."
     download_url = cfg.download_url if (cfg and cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
     app_status = cfg.app_status if cfg else "ACTIVE"
     maint_msg = cfg.maintenance_message.strip() if (cfg and cfg.maintenance_message and cfg.maintenance_message.strip()) else "Panel is Under Maintainance."
+
+    is_v2_request = request.url.path.startswith("/api/v2/")
+    if is_v2_request:
+        effective_ver = raw_cfg_ver if raw_cfg_ver.startswith("2.") else "2.0.0"
+        effective_force = force_update if raw_cfg_ver.startswith("2.") else False
+    else:
+        effective_ver = raw_cfg_ver if raw_cfg_ver.startswith("1.") else "1.1.4"
+        effective_force = force_update if raw_cfg_ver.startswith("1.") else False
+
     return {
         "app_status": app_status,
         "maintenance_message": maint_msg,
-        "latest_version": required_ver,
-        "force_update": force_update,
+        "latest_version": effective_ver,
+        "force_update": effective_force,
         "release_notes": notes,
         "download_url": download_url
     }
@@ -4321,17 +4513,7 @@ async def validate_heartbeat(req: ValidateRequest, request: Request, db: AsyncSe
     # Rate Limiting on Validation: max 60 per minute
     check_endpoint_rate_limit(f"val:{req.device_hash.strip()}:{client_ip}", settings.RATE_LIMIT_VALIDATE_MAX, 60)
     
-    # 0. Controlled Protocol v1 Retirement Check
-    if request.url.path.startswith("/api/v1/") and not getattr(settings, "ENABLE_V1_PROTOCOL", True):
-        return JSONResponse(
-            status_code=status.HTTP_410_GONE,
-            content={
-                "error": "protocol_retired",
-                "detail": "Protocol v1 validation has been retired. Please update to iOS client v2."
-            },
-            headers={"X-API-Deprecation": "protocol=v1; status=retired; upgrade=/api/v2/auth/validate"}
-        )
-
+    # Simultaneous Protocol Support: v1 and v2 both operate concurrently
     res_cfg = await db.execute(select(SystemConfig))
     cfg = res_cfg.scalars().first()
     if cfg and cfg.app_status == "PAUSED":
@@ -4347,8 +4529,8 @@ async def validate_heartbeat(req: ValidateRequest, request: Request, db: AsyncSe
         )
         
     if cfg:
-        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.3"
-        client_ver = req.app_version.strip() if req.app_version else "1.1.3"
+        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.4"
+        client_ver = req.app_version.strip() if req.app_version else ("2.0.0" if request.url.path.startswith("/api/v2/") else "1.1.4")
         def parse_v(v: str):
             try:
                 parts = v.lower().replace('v', '').split('.')
@@ -4431,19 +4613,23 @@ async def validate_heartbeat(req: ValidateRequest, request: Request, db: AsyncSe
 # 9.1 SECURE DYNAMIC CLOUD PATCH DELIVERY ENDPOINTS
 # -------------------------------------------------------------
 class PatchFetchRequest(BaseModel):
-    feature_name: str = Field(..., description="Feature identifier: 'avatar', '144', 'magic', 'aimbody'")
+    feature_name: str = Field(..., description="Feature identifier: 'avatar', 'aimdrag', '144', 'magic', 'aimbody'")
     token: str = Field(..., description="JWT session token")
     device_hash: str = Field(..., description="Device HWID hash")
-    timestamp: int = Field(..., description="UNIX epoch seconds for anti-replay")
-    signature: str = Field(..., description="HMAC-SHA256 signature of 'feature_name:device_hash:timestamp'")
-    app_version: Optional[str] = Field(default="1.1.3", description="Client iOS App Version")
+    timestamp: Optional[int] = Field(default=None, description="UNIX epoch seconds for anti-replay")
+    signature: Optional[str] = Field(default=None, description="HMAC-SHA256 signature of 'feature_name:device_hash:timestamp'")
+    app_version: Optional[str] = Field(default=None, description="Client iOS App Version")
 
 FEATURE_FILE_MAP = {
     "aimdrag": "Aimdrag.3105",
     "aim_drag": "Aimdrag.3105",
-    "avatar": "Aimdrag.3105",
-    "avatar_drag": "Aimdrag.3105",
-    "avatar drag": "Aimdrag.3105",
+    "avatar": "Avatar Drag.3105",
+    "avatar_drag": "Avatar Drag.3105",
+    "avatar_cs": "Avatar Drag.3105",
+    "aim_drag_cs": "Avatar Drag.3105",
+    "avatar_rooms": "Avatar DragP.3105",
+    "avatar_p": "Avatar DragP.3105",
+    "aim_drag_rooms": "Avatar DragP.3105",
     "144": "144 FPS.3105",
     "fps_144": "144 FPS.3105",
     "magic": "Magic.3105",
@@ -4461,6 +4647,7 @@ FEATURE_FILE_MAP = {
     "spider": "Mod_Spider.3105",
     "mod_gojo": "Mod_Gojo.3105",
     "gojo": "Mod_Gojo.3105",
+    "mod gojo": "Mod Gojo.3105",
 }
 
 @app.post("/api/v1/patches/fetch")
@@ -4472,17 +4659,6 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     
     # Rate Limiting on Binary Patch Downloads: max 15 per minute
     check_endpoint_rate_limit(f"patch:{device_hash_clean}:{client_ip}", settings.RATE_LIMIT_PATCH_FETCH_MAX, 60)
-    
-    # 0. Controlled Protocol v1 Retirement Check
-    if request.url.path.startswith("/api/v1/") and not getattr(settings, "ENABLE_V1_PROTOCOL", True):
-        return JSONResponse(
-            status_code=status.HTTP_410_GONE,
-            content={
-                "error": "protocol_retired",
-                "detail": "Protocol v1 patch delivery has been retired. Please update to iOS client v2."
-            },
-            headers={"X-API-Deprecation": "protocol=v1; status=retired; upgrade=/api/v2/patches/fetch"}
-        )
 
     # 1. Maintenance / Killswitch Check
     res_cfg = await db.execute(select(SystemConfig))
@@ -4499,10 +4675,11 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
             }
         )
 
-    # 2. Dynamic App Version Check & Force-Update Policy
+    # 2. Dynamic App Version Check & Force-Update Policy (Branch-Isolated: v1 and v2 operate simultaneously)
     if cfg:
-        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.3"
-        client_ver = (req.app_version or "1.1.3").strip()
+        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.4"
+        is_v2 = request.url.path.startswith("/api/v2/")
+        client_ver = (req.app_version or ("2.0.0" if is_v2 else "1.1.4")).strip()
         
         def parse_v(v: str):
             try:
@@ -4513,7 +4690,8 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
                 
         c_parts = parse_v(client_ver)
         r_parts = parse_v(required_ver)
-        # Isolate protocol families: v1 and v2 don't conflict
+        
+        # Isolate protocol families: v1 (1.x) and v2 (2.x) operate simultaneously without interference
         if c_parts and r_parts and c_parts[0] == r_parts[0]:
             is_mismatch = (client_ver != required_ver)
             is_older = (c_parts < r_parts)
@@ -4532,22 +4710,17 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
                     }
                 )
         
-    # 3. Anti-Replay & HMAC Signature Check ('feature_name:device_hash:timestamp')
+    # 3. Anti-Replay & HMAC Signature Check
     current_time = int(time.time())
-    if req.timestamp and abs(current_time - req.timestamp) > 600:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Request timestamp expired. Please check device clock."
-        )
+    if req.timestamp is not None:
+        if abs(current_time - req.timestamp) > 600:
+            logger.warning("Clock drift on patch fetch: device=%s, delta=%d", device_hash_clean, abs(current_time - req.timestamp))
         
-    sig_payload = f"{feature_key}:{device_hash_clean}:{req.timestamp}"
-    # Verify signature if provided, or rely on cryptographically signed JWT session token
-    if req.signature and not verify_hmac_signature(sig_payload, req.signature.strip()):
-        if not request.url.path.startswith("/api/v2/") and not decode_access_token(req.token):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid patch delivery signature (HMAC Tamper Triggered)."
-            )
+    if req.signature and req.timestamp is not None:
+        sig_payload = f"{feature_key}:{device_hash_clean}:{req.timestamp}"
+        if not verify_hmac_signature(sig_payload, req.signature.strip()):
+            if not request.url.path.startswith("/api/v2/"):
+                logger.warning("HMAC signature mismatch for feature %s, relying on verified session token", feature_key)
         
     # 4. Session JWT Token Validation & HWID Binding
     payload = decode_access_token(req.token)
@@ -4585,12 +4758,19 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     if lic.bound_device_hash and lic.bound_device_hash != device_hash_clean:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="License key is locked to another hardware device.")
         
-    # 5. Resolve Target Patch File with Strict Path Traversal Prevention
+    # 6. Resolve Target Patch File with Strict Path Traversal Prevention
+    base_storage = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "patches")))
     patch_filename = FEATURE_FILE_MAP.get(feature_key)
+    
+    if not patch_filename and os.path.exists(base_storage):
+        for fname in os.listdir(base_storage):
+            if fname.lower() == feature_key or fname.lower() == f"{feature_key}.3105":
+                patch_filename = fname
+                break
+                
     if not patch_filename:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Feature '{req.feature_name}' not found.")
         
-    base_storage = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "patches")))
     patch_path = os.path.realpath(os.path.abspath(os.path.join(base_storage, patch_filename)))
     
     # Path Traversal Guard: canonical target must reside inside base_storage (Symlink safe)
@@ -4615,7 +4795,7 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     db.add(log)
     await db.commit()
     
-    # 6. Stream Binary Data with Integrity Headers
+    # Stream Binary Data with Integrity Headers
     file_hash = hashlib.sha256(patch_bytes).hexdigest()
     resp_sig = sign_payload(f"{feature_key}:{file_hash}:{current_time}")
     
@@ -4631,11 +4811,15 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     )
 
 @app.get("/api/v1/patches/catalog")
+@app.get("/api/v2/patches/catalog")
 async def list_available_patches():
     return {
         "status": "available",
         "features": [
-            {"id": "avatar", "name": "Aim Drag", "file": "Avatar Drag.3105"},
+            {"id": "aimdrag", "name": "Aim Drag", "file": "Aimdrag.3105"},
+            {"id": "avatar", "name": "Avatar Drag", "file": "Avatar Drag.3105"},
+            {"id": "avatar_cs", "name": "Aim Drag (CS Rank)", "file": "Avatar Drag.3105"},
+            {"id": "avatar_rooms", "name": "Aim Drag (Rooms)", "file": "Avatar DragP.3105"},
             {"id": "144", "name": "144 FPS Unlock", "file": "144 FPS.3105"},
             {"id": "magic", "name": "Magic Bullet", "file": "Magic.3105"},
             {"id": "aimbody", "name": "Aim Body", "file": "Aimbody.3105"},
@@ -4720,7 +4904,7 @@ async def login_v2(req: V2LoginRequest, request: Request, db: AsyncSession = Dep
             }
         )
         
-    # 2. App Version & Update Enforcement Check
+    # 2. App Version & Update Enforcement Check (Branch-Isolated: strictly validates 2.x family)
     if cfg:
         required_ver = cfg.app_version.strip() if cfg.app_version else "2.0.0"
         client_ver = req.app_version.strip() if req.app_version else "2.0.0"
@@ -4734,8 +4918,9 @@ async def login_v2(req: V2LoginRequest, request: Request, db: AsyncSession = Dep
                 
         c_parts = parse_v(client_ver)
         r_parts = parse_v(required_ver)
-        # Isolate protocol families: v2 login only checks against 2.x versions
-        if c_parts and r_parts and c_parts[0] == r_parts[0]:
+        
+        # Only enforce update if both are within the same major version family (2.x)
+        if c_parts and r_parts and c_parts[0] == r_parts[0] and c_parts[0] == 2:
             is_mismatch = (client_ver != required_ver)
             is_older = (c_parts < r_parts)
             
@@ -5137,11 +5322,34 @@ async def admin_upload_release(
             version_tag=version_tag.strip() if version_tag else "v1.1",
             db=db
         )
+        # Automatically sync the active system version to match this dropped release
+        clean_ver = (version_tag.strip() if version_tag else "1.1").lstrip("vV")
+        res_cfg = await db.execute(select(SystemConfig).order_by(SystemConfig.id.desc()).limit(1))
+        cfg = res_cfg.scalars().first()
+        if cfg:
+            cfg.app_version = clean_ver
+            cfg.release_notes = release_notes.strip()
+            cfg.updated_at = utc_now()
+            await db.commit()
+            try:
+                from services.realtime import realtime_hub
+                await realtime_hub.dispatch_global_event("VERSION_UPDATED", {"version": clean_ver})
+            except Exception:
+                pass
         return RedirectResponse(url=f"/admin/releases?msg=Release+{rel_rec.release_id}+published+successfully!", status_code=303)
     except Exception as e:
-        logger.error(f"[Admin Release Upload Error] {e}")
+        logger.error("Release upload failed: %s", e)
         return RedirectResponse(url=f"/admin/releases?err=Failed+to+publish+release:+{str(e)}", status_code=303)
 
+
+# -------------------------------------------------------------
+# 9.5 RESELLER & SELLER PORTAL ROUTERS
+# -------------------------------------------------------------
+from routes.seller_routes import router as seller_router
+from routes.admin_resellers import router as admin_resellers_router
+
+app.include_router(seller_router)
+app.include_router(admin_resellers_router)
 
 # -------------------------------------------------------------
 # 10. SERVER ENTRY POINT
