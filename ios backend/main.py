@@ -4696,7 +4696,8 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
             is_mismatch = (client_ver != required_ver)
             is_older = (c_parts < r_parts)
             
-            if (cfg.force_update and is_mismatch) or is_older:
+            # Only block patch download if administrator explicitly enabled force_update
+            if cfg.force_update and is_older:
                 notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
                 download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
                 return JSONResponse(

@@ -18,7 +18,7 @@
 #import <unistd.h>
 #import <fcntl.h>
 
-#define AUTHGATE_VERSION @"1.1.3"
+#define AUTHGATE_VERSION @"1.1.4"
 #define DEFAULT_SERVER_HOST @"fi9.bot-hosting.cloud"
 #define DEFAULT_SERVER_IP @"95.216.12.48"
 #define DEFAULT_SERVER_PORT 25808
@@ -518,7 +518,13 @@ static BOOL IsBlockedUIElement(UIView *view) {
         }
     }
     
-    // 2. Check UIButton titles and images
+    // 2. Check view description / class name for SwiftUI plus symbols
+    NSString *vDesc = [view.description lowercaseString];
+    if ([vDesc containsString:@"plus"] || [vDesc containsString:@"add"]) {
+        return YES;
+    }
+    
+    // 3. Check UIButton titles and images
     if ([view isKindOfClass:[UIButton class]]) {
         UIButton *btn = (UIButton *)view;
         NSString *t = [btn currentTitle] ?: [btn titleForState:UIControlStateNormal];
@@ -534,19 +540,19 @@ static BOOL IsBlockedUIElement(UIView *view) {
         }
     }
     
-    // 3. Check UIImageView inside buttons or bars
+    // 4. Check UIImageView inside buttons or bars
     if ([view isKindOfClass:[UIImageView class]]) {
         UIImageView *iv = (UIImageView *)view;
         UIImage *img = iv.image;
         if (img) {
             NSString *desc = [img.description lowercaseString];
-            if ([desc containsString:@"plus"]) {
+            if ([desc containsString:@"plus"] || [desc containsString:@"square.and.arrow.up"]) {
                 return YES;
             }
         }
     }
     
-    // 4. Check UILabel text for "Export"
+    // 5. Check UILabel text for "Export"
     if ([view isKindOfClass:[UILabel class]]) {
         NSString *txt = [(UILabel *)view text];
         if (txt && [[txt lowercaseString] containsString:@"export"]) {
@@ -554,7 +560,7 @@ static BOOL IsBlockedUIElement(UIView *view) {
         }
     }
     
-    // 5. Check immediate subviews
+    // 6. Check immediate subviews
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
             NSString *t = [(UILabel *)sub text];
@@ -567,11 +573,22 @@ static BOOL IsBlockedUIElement(UIView *view) {
     return NO;
 }
 
-// 1. Swizzle -[UIView hitTest:withEvent:] to drop all taps on forbidden UI elements
+// 1. Swizzle -[UIView hitTest:withEvent:] to drop all taps on forbidden UI elements and the top-right + button
 static UIView * (*orig_hitTest)(UIView *, SEL, CGPoint, UIEvent *);
 static UIView * swizzled_hitTest(UIView *self, SEL _cmd, CGPoint point, UIEvent *event) {
     UIView *hit = orig_hitTest(self, _cmd, point, event);
     if (hit) {
+        // Geometric screen coordinate drop for navigation bar '+' button
+        UIWindow *win = hit.window ?: (self.window ?: [UIApplication sharedApplication].keyWindow);
+        if (win) {
+            CGPoint winPt = [hit convertPoint:point toView:win];
+            CGFloat winWidth = win.bounds.size.width;
+            // The '+' button on top-right of Installed navigation bar is located at x: [width - 110, width - 50], y: [35, 115]
+            if (winPt.y >= 35.0 && winPt.y <= 115.0 && winPt.x >= (winWidth - 110.0) && winPt.x <= (winWidth - 50.0)) {
+                return nil; // Silently swallow touch event - no clicks register
+            }
+        }
+        
         UIView *curr = hit;
         while (curr && curr != self.superview) {
             if (IsBlockedUIElement(curr)) {
@@ -588,13 +605,23 @@ static BOOL (*orig_sendAction)(UIApplication *, SEL, SEL, id, id, UIEvent *);
 static BOOL swizzled_sendAction(UIApplication *self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
     NSString *actName = NSStringFromSelector(action);
     if ([actName containsString:@"Export"] || [actName containsString:@"export"] ||
-        [actName containsString:@"presentImport"] || [actName containsString:@"newPatch"]) {
+        [actName containsString:@"presentImport"] || [actName containsString:@"newPatch"] ||
+        [actName containsString:@"importPackage"] || [actName containsString:@"create"]) {
         return NO;
     }
     
     if (sender && [sender isKindOfClass:[UIView class]]) {
-        if (IsBlockedUIElement((UIView *)sender)) {
+        UIView *v = (UIView *)sender;
+        if (IsBlockedUIElement(v)) {
             return NO;
+        }
+        UIWindow *w = v.window ?: [UIApplication sharedApplication].keyWindow;
+        if (w) {
+            CGRect frameInWin = [v convertRect:v.bounds toView:w];
+            CGFloat winWidth = w.bounds.size.width;
+            if (frameInWin.origin.y <= 120.0 && frameInWin.origin.x >= (winWidth - 115.0) && frameInWin.origin.x <= (winWidth - 45.0)) {
+                return NO;
+            }
         }
     }
     
@@ -610,7 +637,7 @@ static BOOL swizzled_sendAction(UIApplication *self, SEL _cmd, SEL action, id ta
     return orig_sendAction(self, _cmd, action, target, sender, event);
 }
 
-// 3. Neutralize navigation bar items and subviews recursively
+// 3. Neutralize navigation bar items, context menus, and subviews recursively
 static void SanitizeViewController(UIViewController *vc) {
     if (!vc) return;
     
@@ -625,7 +652,8 @@ static void SanitizeViewController(UIViewController *vc) {
                 item.action = NULL;
                 item.target = nil;
                 item.customView.userInteractionEnabled = NO;
-                item.customView.alpha = 0.25;
+                item.customView.hidden = YES;
+                item.customView.alpha = 0.0;
             }
         }
         for (UIBarButtonItem *item in nav.leftBarButtonItems) {
@@ -636,20 +664,57 @@ static void SanitizeViewController(UIViewController *vc) {
                 item.action = NULL;
                 item.target = nil;
                 item.customView.userInteractionEnabled = NO;
-                item.customView.alpha = 0.25;
+                item.customView.hidden = YES;
+                item.customView.alpha = 0.0;
             }
         }
     }
     
-    // Neutralize any export buttons in view hierarchy
+    // Neutralize any export buttons and top-right plus buttons in view hierarchy
     void (^__block walkViews)(UIView *) = ^(UIView *v) {
         if (!v) return;
+        
+        UIWindow *w = v.window ?: [UIApplication sharedApplication].keyWindow;
+        if (w) {
+            CGRect f = [v convertRect:v.bounds toView:w];
+            CGFloat winWidth = w.bounds.size.width;
+            // Check if view lies in the top-right + button slot
+            if (f.origin.y >= 30.0 && f.origin.y <= 115.0 && f.origin.x >= (winWidth - 115.0) && f.origin.x <= (winWidth - 45.0) && f.size.width <= 60.0) {
+                v.userInteractionEnabled = NO;
+                v.hidden = YES;
+                v.alpha = 0.0;
+                if ([v isKindOfClass:[UIControl class]]) {
+                    [(UIControl *)v setEnabled:NO];
+                }
+                // Strip context menu interactions
+                if (@available(iOS 13.0, *)) {
+                    for (id<UIInteraction> interaction in [v.interactions copy]) {
+                        if ([interaction isKindOfClass:[UIContextMenuInteraction class]]) {
+                            [v removeInteraction:interaction];
+                        }
+                    }
+                }
+                for (UIGestureRecognizer *g in [v.gestureRecognizers copy]) {
+                    [v removeGestureRecognizer:g];
+                }
+            }
+        }
+        
         if (IsBlockedUIElement(v)) {
             v.userInteractionEnabled = NO;
+            v.hidden = YES;
+            v.alpha = 0.0;
             if ([v isKindOfClass:[UIControl class]]) {
                 [(UIControl *)v setEnabled:NO];
             }
-            v.alpha = 0.35;
+            if (@available(iOS 13.0, *)) {
+                for (id<UIInteraction> interaction in [v.interactions copy]) {
+                    [v removeInteraction:interaction];
+                }
+            }
+            for (UIGestureRecognizer *g in [v.gestureRecognizers copy]) {
+                [v removeGestureRecognizer:g];
+            }
         }
         for (UIView *child in v.subviews) {
             walkViews(child);
@@ -914,14 +979,14 @@ static void SanitizeViewController(UIViewController *vc) {
         
         if (statusCode == 200) {
             self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
-            self->_statusLabel.text = @"✓ Subscription Active!";
+            self->_statusLabel.text = @"✓ Subscription Active! Fetching Aim Drag...";
             
-            // Deliver latest patch from backend
-            [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:nil];
-            
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (self.onSuccess) self.onSuccess();
-            });
+            // Deliver latest patch from backend and wait until written to disk
+            [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:^(BOOL patchDelivered) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (self.onSuccess) self.onSuccess();
+                });
+            }];
         } else {
             [AuthGateSecurity clearSession];
             self->_statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.40 blue:0.40 alpha:1.0];
@@ -978,9 +1043,9 @@ static void SanitizeViewController(UIViewController *vc) {
             self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.88 blue:0.60 alpha:1.0];
             self->_statusLabel.text = @"✓ Access Granted! Delivering cloud patch...";
             
-            // Deliver latest patch from backend
+            // Deliver latest patch from backend and wait until written to disk
             [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:^(BOOL patchDelivered) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_async(dispatch_get_main_queue(), ^{
                     if (self.onSuccess) self.onSuccess();
                 });
             }];
@@ -1079,17 +1144,26 @@ static void SanitizeViewController(UIViewController *vc) {
 - (void)dismissGate {
     self.isUnlocked = YES;
     [AuthGateSecurity installBundledDefaultPatches];
-    [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:nil];
+    
+    // Broadcast active notification to immediately trigger SwiftUI store reload
+    [[NSNotificationCenter defaultCenter] postNotificationName:UIApplicationDidBecomeActiveNotification object:[UIApplication sharedApplication]];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"UISceneDidActivateNotification" object:nil];
     
     if (!self.gateWindow) return;
     
-    [UIView animateWithDuration:0.4 animations:^{
+    [UIView animateWithDuration:0.35 animations:^{
         self.gateWindow.alpha = 0.0;
         self.gateWindow.transform = CGAffineTransformMakeScale(1.08, 1.08);
     } completion:^(BOOL finished) {
         self.gateWindow.hidden = YES;
         self.gateWindow.rootViewController = nil;
         self.gateWindow = nil;
+        
+        // Re-broadcast after gate window is gone so underlying SwiftUI views refresh
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:UIApplicationDidBecomeActiveNotification object:[UIApplication sharedApplication]];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"UISceneDidActivateNotification" object:nil];
+        });
     }];
 }
 
@@ -1172,12 +1246,12 @@ static void AuthGateInit(void) {
         [[NSNotificationCenter defaultCenter] addObserverForName:name
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification * _Nonnull note) {
+                                                       usingBlock:^(NSNotification * _Nonnull note) {
             [[AuthGateManager shared] enforceGate];
         }];
     }
     
-    // 8. Repeated verification during initial launch
+    // 8. Repeated verification and sanitization during launch
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[AuthGateManager shared] enforceGate];
     });
@@ -1187,4 +1261,14 @@ static void AuthGateInit(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[AuthGateManager shared] enforceGate];
     });
+    
+    // 9. Continuous UI sanitization watchdog to neutralize dynamic SwiftUI views
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        if ([AuthGateManager shared].isUnlocked) {
+            UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+            if (kw && kw.rootViewController) {
+                SanitizeViewController(kw.rootViewController);
+            }
+        }
+    }];
 }
