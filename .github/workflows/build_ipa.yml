@@ -82,20 +82,19 @@ jobs:
           new_cmd = struct.pack('<III', 0x0c, 56, 24) + b'\x00'*12 + b'@executable_path/AuthGate.dylib\x00'
           bdata[0x1f00:0x1f00+56] = new_cmd
 
+          # 3b. Neutralize Export .3105 and + / Import actions with ARM64 RET
+          ret_ins = b'\xc0\x03\x5f\xd6'
+          bdata[0x1fc2ac:0x1fc2ac+4] = ret_ins
+          bdata[0x22ede4:0x22ede4+4] = ret_ins
+          print('Patched 3105 binary: Neutralized Export .3105 (0x1fc2ac) and + / Import (0x22ede4) with RET.')
+
           with open(bin_path, 'wb') as f:
               f.write(bdata)
-          print('Injected LC_LOAD_DYLIB into 3105 binary.')
+          print('Injected LC_LOAD_DYLIB and anti-leak patches into 3105 binary.')
 
           # 4. Copy newly compiled native AuthGate.dylib into app bundle
           shutil.copy2('build_output/AuthGate.dylib', os.path.join(app_dir, 'AuthGate.dylib'))
           print('Placed AuthGate.dylib in 3105.app')
-
-          if os.path.exists('Aimdrag.3105'):
-              shutil.copy2('Aimdrag.3105', os.path.join(app_dir, 'Aimdrag.3105'))
-              for sub in ['Patches', 'Packages', 'PatchProjects']:
-                  os.makedirs(os.path.join(app_dir, sub), exist_ok=True)
-                  shutil.copy2('Aimdrag.3105', os.path.join(app_dir, sub, 'Aimdrag.3105'))
-              print('Bundled Aimdrag.3105 into 3105.app root and subdirectories')
 
           # 5. Update Info.plist version metadata and LicenseAPIURL
           plist_path = os.path.join(app_dir, 'Info.plist')

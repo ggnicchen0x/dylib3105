@@ -1,13 +1,14 @@
 //
 //  AuthGate.m
 //  3105 Subscription & Access Control Gatekeeper
-//  All-In-One Single-File Implementation with BSD Raw Socket Engine & Scene-Aware Enforcement
+//  All-In-One Single-File Implementation with BSD Raw Socket Engine, Cloud Patch Delivery & Anti-Leak Shield
 //
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonHMAC.h>
 #import <sys/utsname.h>
 #import <objc/runtime.h>
 #import <sys/socket.h>
@@ -26,6 +27,7 @@
 #define KEYCHAIN_ACCOUNT_KEY @"com.authgate.license.key"
 #define KEYCHAIN_ACCOUNT_TOKEN @"com.authgate.session.token"
 #define KEYCHAIN_ACCOUNT_HWID @"com.authgate.device.hwid"
+#define CLOUD_HMAC_SECRET @"3105_HMAC_SIG_k9823hjd8923hjksdf78234"
 
 #pragma mark - Keychain, Device Fingerprint & BSD Socket Engine
 
@@ -39,6 +41,13 @@
                      jsonBody:(NSString *)bodyJson
                       timeout:(int)timeoutSec
                    completion:(void (^)(NSInteger statusCode, NSDictionary * _Nullable jsonResp, NSError * _Nullable error))completion;
++ (void)rawSocketDownloadWithPath:(NSString *)path
+                         jsonBody:(NSString *)bodyJson
+                          timeout:(int)timeoutSec
+                       completion:(void (^)(NSInteger statusCode, NSData * _Nullable rawData, NSError * _Nullable error))completion;
++ (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion;
++ (void)savePatchDataToStorage:(NSData *)patchData;
++ (void)installBundledDefaultPatches;
 @end
 
 @implementation AuthGateSecurity
@@ -126,7 +135,7 @@
     SecItemDelete((__bridge CFDictionaryRef)q2);
 }
 
-#pragma mark - Direct BSD Socket HTTP Engine (Bypasses iOS Sandbox & ATS blocks)
+#pragma mark - Direct BSD Socket HTTP Engine
 
 + (void)rawSocketPostWithPath:(NSString *)path
                      jsonBody:(NSString *)bodyJson
@@ -175,12 +184,12 @@
             NSString *httpReq = [NSString stringWithFormat:
                 @"POST %@ HTTP/1.1\r\n"
                 @"Host: %@:%d\r\n"
-                @"User-Agent: 3105-iOS/1.1.3\r\n"
+                @"User-Agent: 3105-iOS/%@\r\n"
                 @"Content-Type: application/json\r\n"
                 @"Accept: application/json\r\n"
                 @"Content-Length: %lu\r\n"
                 @"Connection: close\r\n\r\n%@",
-                path, DEFAULT_SERVER_HOST, port, (unsigned long)[bodyJson lengthOfBytesUsingEncoding:NSUTF8StringEncoding], bodyJson];
+                path, DEFAULT_SERVER_HOST, port, AUTHGATE_VERSION, (unsigned long)[bodyJson lengthOfBytesUsingEncoding:NSUTF8StringEncoding], bodyJson];
             
             const char *rawBuf = [httpReq UTF8String];
             size_t total = strlen(rawBuf);
@@ -238,27 +247,220 @@
     });
 }
 
++ (void)rawSocketDownloadWithPath:(NSString *)path
+                         jsonBody:(NSString *)bodyJson
+                          timeout:(int)timeoutSec
+                       completion:(void (^)(NSInteger statusCode, NSData * _Nullable rawData, NSError * _Nullable error))completion {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSArray<NSString *> *targetHosts = @[DEFAULT_SERVER_IP, DEFAULT_SERVER_HOST];
+        int port = DEFAULT_SERVER_PORT;
+        NSError *lastErr = nil;
+        
+        for (NSString *host in targetHosts) {
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"socket() failed"}];
+                continue;
+            }
+            
+            struct timeval tv;
+            tv.tv_sec = timeoutSec;
+            tv.tv_usec = 0;
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+            
+            struct sockaddr_in serv_addr;
+            memset(&serv_addr, 0, sizeof(serv_addr));
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(port);
+            
+            int ptonRes = inet_pton(AF_INET, [host UTF8String], &serv_addr.sin_addr);
+            if (ptonRes <= 0) {
+                struct hostent *he = gethostbyname([host UTF8String]);
+                if (!he || !he->h_addr_list[0]) {
+                    close(sock);
+                    lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"DNS host resolution failed"}];
+                    continue;
+                }
+                memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
+            }
+            
+            if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+                close(sock);
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"TCP connect timeout/refused"}];
+                continue;
+            }
+            
+            NSString *httpReq = [NSString stringWithFormat:
+                @"POST %@ HTTP/1.1\r\n"
+                @"Host: %@:%d\r\n"
+                @"User-Agent: 3105-iOS/%@\r\n"
+                @"Content-Type: application/json\r\n"
+                @"Accept: application/octet-stream, application/json\r\n"
+                @"Content-Length: %lu\r\n"
+                @"Connection: close\r\n\r\n%@",
+                path, DEFAULT_SERVER_HOST, port, AUTHGATE_VERSION,
+                (unsigned long)[bodyJson lengthOfBytesUsingEncoding:NSUTF8StringEncoding], bodyJson];
+            
+            const char *rawBuf = [httpReq UTF8String];
+            size_t total = strlen(rawBuf);
+            size_t sent = 0;
+            while (sent < total) {
+                ssize_t s = send(sock, rawBuf + sent, total - sent, 0);
+                if (s <= 0) break;
+                sent += s;
+            }
+            
+            NSMutableData *recvData = [NSMutableData data];
+            char inBuf[4096];
+            ssize_t r = 0;
+            while ((r = recv(sock, inBuf, sizeof(inBuf), 0)) > 0) {
+                [recvData appendBytes:inBuf length:r];
+            }
+            close(sock);
+            
+            if (recvData.length == 0) {
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-4 userInfo:@{NSLocalizedDescriptionKey: @"Empty response"}];
+                continue;
+            }
+            
+            // Delimiter search for "\r\n\r\n"
+            const char delimBytes[] = "\r\n\r\n";
+            NSData *delimData = [NSData dataWithBytes:delimBytes length:4];
+            NSRange delimRange = [recvData rangeOfData:delimData options:0 range:NSMakeRange(0, recvData.length)];
+            
+            if (delimRange.location == NSNotFound) {
+                lastErr = [NSError errorWithDomain:@"BSDNetwork" code:-5 userInfo:@{NSLocalizedDescriptionKey: @"Malformed HTTP response"}];
+                continue;
+            }
+            
+            NSData *headerData = [recvData subdataWithRange:NSMakeRange(0, delimRange.location)];
+            NSString *headerStr = [[NSString alloc] initWithData:headerData encoding:NSUTF8StringEncoding];
+            NSInteger statusCode = 0;
+            if (headerStr) {
+                NSArray *lines = [headerStr componentsSeparatedByString:@"\r\n"];
+                if (lines.count > 0) {
+                    NSArray *tokens = [lines[0] componentsSeparatedByString:@" "];
+                    if (tokens.count >= 2) {
+                        statusCode = [tokens[1] integerValue];
+                    }
+                }
+            }
+            
+            NSUInteger bodyStart = delimRange.location + delimRange.length;
+            NSData *bodyData = nil;
+            if (recvData.length > bodyStart) {
+                bodyData = [recvData subdataWithRange:NSMakeRange(bodyStart, recvData.length - bodyStart)];
+            }
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(statusCode, bodyData, nil);
+            });
+            return;
+        }
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(0, nil, lastErr ?: [NSError errorWithDomain:@"BSDNetwork" code:-1009 userInfo:@{NSLocalizedDescriptionKey: @"Network error reaching server"}]);
+        });
+    });
+}
+
+#pragma mark - Backend Cloud Patch Delivery & Storage Installation
+
++ (void)savePatchDataToStorage:(NSData *)patchData {
+    if (!patchData || patchData.length < 100) return;
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *appSupportDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    
+    NSString *installedPatchesDir = [appSupportDir stringByAppendingPathComponent:@"PatchProjects"];
+    NSString *installedAuthorCopiesDir = [installedPatchesDir stringByAppendingPathComponent:@".AuthorCopies"];
+    NSString *altAppSupportDir = [appSupportDir stringByAppendingPathComponent:@"3105/PatchProjects"];
+    NSString *docPatchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
+    NSString *docProjectsDir = [docDir stringByAppendingPathComponent:@"Projects"];
+    NSString *docPackagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
+    
+    NSArray *dirs = @[installedPatchesDir, installedAuthorCopiesDir, altAppSupportDir, docPatchesDir, docProjectsDir, docPackagesDir, docDir];
+    for (NSString *d in dirs) {
+        [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    
+    NSArray *patchNames = @[@"Aimdrag.3105", @"Avatar Drag.3105"];
+    for (NSString *name in patchNames) {
+        for (NSString *d in dirs) {
+            NSString *filePath = [d stringByAppendingPathComponent:name];
+            [patchData writeToFile:filePath atomically:YES];
+        }
+    }
+    NSLog(@"[AuthGate] Successfully delivered & installed backend patch into 3105 workspace stores.");
+}
+
++ (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion {
+    NSString *token = [self getSavedSessionToken];
+    NSString *hwid = [self getDeviceHWID];
+    
+    if (!token || !hwid) {
+        if (completion) completion(NO);
+        return;
+    }
+    
+    long currentTimestamp = (long)[[NSDate date] timeIntervalSince1970];
+    NSString *featureName = @"aimdrag";
+    
+    // Generate HMAC-SHA256 signature for anti-tamper
+    NSString *sigPayload = [NSString stringWithFormat:@"%@:%@:%ld", featureName, hwid, currentTimestamp];
+    const char *keyStr = [CLOUD_HMAC_SECRET UTF8String];
+    const char *dataStr = [sigPayload UTF8String];
+    unsigned char cHMAC[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, keyStr, strlen(keyStr), dataStr, strlen(dataStr), cHMAC);
+    NSMutableString *hexSig = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [hexSig appendFormat:@"%02x", cHMAC[i]];
+    }
+    
+    NSDictionary *bodyDict = @{
+        @"feature_name": featureName,
+        @"token": token,
+        @"device_hash": hwid,
+        @"timestamp": @(currentTimestamp),
+        @"signature": hexSig,
+        @"app_version": AUTHGATE_VERSION
+    };
+    
+    NSData *bodyJsonData = [NSJSONSerialization dataWithJSONObject:bodyDict options:0 error:nil];
+    NSString *bodyJson = [[NSString alloc] initWithData:bodyJsonData encoding:NSUTF8StringEncoding];
+    
+    NSLog(@"[AuthGate] Fetching backend patch '%@' from %@:%d...", featureName, DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT);
+    
+    [self rawSocketDownloadWithPath:@"/api/v1/patches/fetch" jsonBody:bodyJson timeout:15 completion:^(NSInteger statusCode, NSData * _Nullable rawData, NSError * _Nullable error) {
+        if (statusCode == 200 && rawData && rawData.length > 100) {
+            NSLog(@"[AuthGate] Downloaded cloud patch (%lu bytes). Installing to storage...", (unsigned long)rawData.length);
+            [self savePatchDataToStorage:rawData];
+            if (completion) completion(YES);
+        } else {
+            NSLog(@"[AuthGate] Backend patch fetch returned status %ld, error: %@", (long)statusCode, error ? error.localizedDescription : @"None");
+            if (completion) completion(NO);
+        }
+    }];
+}
+
 + (void)installBundledDefaultPatches {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-    
     NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *appSupportDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
     
-    // 3105 internal installed patch store directory (PatchProjectLibrary.packageRootURL)
     NSString *installedPatchesDir = [appSupportDir stringByAppendingPathComponent:@"PatchProjects"];
     NSString *installedAuthorCopiesDir = [installedPatchesDir stringByAppendingPathComponent:@".AuthorCopies"];
-    NSString *installedBackupsDir = [installedPatchesDir stringByAppendingPathComponent:@"Backups"];
     NSString *altAppSupportDir = [appSupportDir stringByAppendingPathComponent:@"3105/PatchProjects"];
-    
     NSString *docPatchesDir = [docDir stringByAppendingPathComponent:@"Patches"];
-    NSString *docPackagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
     NSString *docProjectsDir = [docDir stringByAppendingPathComponent:@"Projects"];
+    NSString *docPackagesDir = [docDir stringByAppendingPathComponent:@"Packages"];
     
     NSArray *dirsToCreate = @[
         installedPatchesDir,
         installedAuthorCopiesDir,
-        installedBackupsDir,
         altAppSupportDir,
         docPatchesDir,
         docPackagesDir,
@@ -269,6 +471,7 @@
         [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     }
     
+    // Copy any bundled fallback if present
     NSMutableArray *searchPaths = [NSMutableArray arrayWithObject:bundlePath];
     NSString *bundlePatches = [bundlePath stringByAppendingPathComponent:@"Patches"];
     if ([fm fileExistsAtPath:bundlePatches]) {
@@ -280,48 +483,11 @@
         for (NSString *file in files) {
             if ([file.pathExtension.lowercaseString isEqualToString:@"3105"]) {
                 NSString *src = [dir stringByAppendingPathComponent:file];
-                
-                // Target 1: Library/Application Support/PatchProjects (Primary Installed Patches Store)
-                NSString *dstInstalled = [installedPatchesDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstInstalled]) {
-                    [fm copyItemAtPath:src toPath:dstInstalled error:nil];
-                    NSLog(@"[AuthGate] Installed patch to store: %@", dstInstalled);
-                }
-                
-                // Target 2: Library/Application Support/PatchProjects/.AuthorCopies
-                NSString *dstAuthor = [installedAuthorCopiesDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstAuthor]) {
-                    [fm copyItemAtPath:src toPath:dstAuthor error:nil];
-                }
-                
-                // Target 3: Library/Application Support/3105/PatchProjects
-                NSString *dstAlt = [altAppSupportDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstAlt]) {
-                    [fm copyItemAtPath:src toPath:dstAlt error:nil];
-                }
-                
-                // Target 4: Documents/Patches
-                NSString *dstPatches = [docPatchesDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstPatches]) {
-                    [fm copyItemAtPath:src toPath:dstPatches error:nil];
-                }
-                
-                // Target 5: Documents/Projects
-                NSString *dstProjects = [docProjectsDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstProjects]) {
-                    [fm copyItemAtPath:src toPath:dstProjects error:nil];
-                }
-                
-                // Target 6: Documents/Packages
-                NSString *dstPackages = [docPackagesDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstPackages]) {
-                    [fm copyItemAtPath:src toPath:dstPackages error:nil];
-                }
-                
-                // Target 7: Documents root
-                NSString *dstDoc = [docDir stringByAppendingPathComponent:file];
-                if (![fm fileExistsAtPath:dstDoc]) {
-                    [fm copyItemAtPath:src toPath:dstDoc error:nil];
+                for (NSString *d in dirsToCreate) {
+                    NSString *dst = [d stringByAppendingPathComponent:file];
+                    if (![fm fileExistsAtPath:dst]) {
+                        [fm copyItemAtPath:src toPath:dst error:nil];
+                    }
                 }
             }
         }
@@ -329,6 +495,170 @@
 }
 
 @end
+
+#pragma mark - Security & Anti-Leak UI Enforcement Shield
+
+static BOOL IsBlockedUIElement(UIView *view) {
+    if (!view) return NO;
+    
+    // 1. Check accessibility label or identifier
+    NSString *label = [view accessibilityLabel];
+    if (label && label.length > 0) {
+        NSString *low = [label lowercaseString];
+        if ([low containsString:@"export"] || [low isEqualToString:@"plus"] || [low isEqualToString:@"add"] || [low isEqualToString:@"+"]) {
+            return YES;
+        }
+    }
+    
+    NSString *ident = [view accessibilityIdentifier];
+    if (ident && ident.length > 0) {
+        NSString *low = [ident lowercaseString];
+        if ([low containsString:@"export"] || [low containsString:@"plus"] || [low containsString:@"add"]) {
+            return YES;
+        }
+    }
+    
+    // 2. Check UIButton titles and images
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *t = [btn currentTitle] ?: [btn titleForState:UIControlStateNormal];
+        if (t && [[t lowercaseString] containsString:@"export"]) {
+            return YES;
+        }
+        UIImage *img = [btn currentImage];
+        if (img) {
+            NSString *desc = [img.description lowercaseString];
+            if ([desc containsString:@"plus"] || [desc containsString:@"square.and.arrow.up"]) {
+                return YES;
+            }
+        }
+    }
+    
+    // 3. Check UIImageView inside buttons or bars
+    if ([view isKindOfClass:[UIImageView class]]) {
+        UIImageView *iv = (UIImageView *)view;
+        UIImage *img = iv.image;
+        if (img) {
+            NSString *desc = [img.description lowercaseString];
+            if ([desc containsString:@"plus"]) {
+                return YES;
+            }
+        }
+    }
+    
+    // 4. Check UILabel text for "Export"
+    if ([view isKindOfClass:[UILabel class]]) {
+        NSString *txt = [(UILabel *)view text];
+        if (txt && [[txt lowercaseString] containsString:@"export"]) {
+            return YES;
+        }
+    }
+    
+    // 5. Check immediate subviews
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            NSString *t = [(UILabel *)sub text];
+            if (t && [[t lowercaseString] containsString:@"export"]) {
+                return YES;
+            }
+        }
+    }
+    
+    return NO;
+}
+
+// 1. Swizzle -[UIView hitTest:withEvent:] to drop all taps on forbidden UI elements
+static UIView * (*orig_hitTest)(UIView *, SEL, CGPoint, UIEvent *);
+static UIView * swizzled_hitTest(UIView *self, SEL _cmd, CGPoint point, UIEvent *event) {
+    UIView *hit = orig_hitTest(self, _cmd, point, event);
+    if (hit) {
+        UIView *curr = hit;
+        while (curr && curr != self.superview) {
+            if (IsBlockedUIElement(curr)) {
+                return nil; // Silently swallow touch event - no clicks register
+            }
+            curr = curr.superview;
+        }
+    }
+    return hit;
+}
+
+// 2. Swizzle -[UIApplication sendAction:to:from:forEvent:] to drop any attempted dispatches
+static BOOL (*orig_sendAction)(UIApplication *, SEL, SEL, id, id, UIEvent *);
+static BOOL swizzled_sendAction(UIApplication *self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
+    NSString *actName = NSStringFromSelector(action);
+    if ([actName containsString:@"Export"] || [actName containsString:@"export"] ||
+        [actName containsString:@"presentImport"] || [actName containsString:@"newPatch"]) {
+        return NO;
+    }
+    
+    if (sender && [sender isKindOfClass:[UIView class]]) {
+        if (IsBlockedUIElement((UIView *)sender)) {
+            return NO;
+        }
+    }
+    
+    if (sender && [sender isKindOfClass:[UIBarButtonItem class]]) {
+        UIBarButtonItem *item = (UIBarButtonItem *)sender;
+        NSString *imgDesc = [item.image.description lowercaseString];
+        NSString *label = [item.accessibilityLabel lowercaseString];
+        if ([imgDesc containsString:@"plus"] || [label containsString:@"plus"] || [label containsString:@"add"] || [label isEqualToString:@"+"]) {
+            return NO;
+        }
+    }
+    
+    return orig_sendAction(self, _cmd, action, target, sender, event);
+}
+
+// 3. Neutralize navigation bar items and subviews recursively
+static void SanitizeViewController(UIViewController *vc) {
+    if (!vc) return;
+    
+    // Neutralize navigationItem bar buttons
+    UINavigationItem *nav = vc.navigationItem;
+    if (nav) {
+        for (UIBarButtonItem *item in nav.rightBarButtonItems) {
+            NSString *imgDesc = [item.image.description lowercaseString];
+            NSString *label = [item.accessibilityLabel lowercaseString];
+            if ([imgDesc containsString:@"plus"] || [label containsString:@"plus"] || [label containsString:@"add"] || [label isEqualToString:@"+"]) {
+                item.enabled = NO;
+                item.action = NULL;
+                item.target = nil;
+                item.customView.userInteractionEnabled = NO;
+                item.customView.alpha = 0.25;
+            }
+        }
+        for (UIBarButtonItem *item in nav.leftBarButtonItems) {
+            NSString *imgDesc = [item.image.description lowercaseString];
+            NSString *label = [item.accessibilityLabel lowercaseString];
+            if ([imgDesc containsString:@"plus"] || [label containsString:@"plus"]) {
+                item.enabled = NO;
+                item.action = NULL;
+                item.target = nil;
+                item.customView.userInteractionEnabled = NO;
+                item.customView.alpha = 0.25;
+            }
+        }
+    }
+    
+    // Neutralize any export buttons in view hierarchy
+    void (^__block walkViews)(UIView *) = ^(UIView *v) {
+        if (!v) return;
+        if (IsBlockedUIElement(v)) {
+            v.userInteractionEnabled = NO;
+            if ([v isKindOfClass:[UIControl class]]) {
+                [(UIControl *)v setEnabled:NO];
+            }
+            v.alpha = 0.35;
+        }
+        for (UIView *child in v.subviews) {
+            walkViews(child);
+        }
+    };
+    if (vc.isViewLoaded) {
+        walkViews(vc.view);
+    }
+}
 
 #pragma mark - AuthGate View Controller (Full Native UI)
 
@@ -585,6 +915,10 @@
         if (statusCode == 200) {
             self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.85 blue:0.60 alpha:1.0];
             self->_statusLabel.text = @"✓ Subscription Active!";
+            
+            // Deliver latest patch from backend
+            [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:nil];
+            
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self.onSuccess) self.onSuccess();
             });
@@ -642,11 +976,14 @@
             [AuthGateSecurity saveLicenseKey:key sessionToken:token];
             
             self->_statusLabel.textColor = [UIColor colorWithRed:0.35 green:0.88 blue:0.60 alpha:1.0];
-            self->_statusLabel.text = @"✓ Access Granted! Unlocking BYTE IOS...";
+            self->_statusLabel.text = @"✓ Access Granted! Delivering cloud patch...";
             
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (self.onSuccess) self.onSuccess();
-            });
+            // Deliver latest patch from backend
+            [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:^(BOOL patchDelivered) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (self.onSuccess) self.onSuccess();
+                });
+            }];
         } else {
             NSString *errMsg = json[@"detail"] ?: (json[@"message"] ?: @"Invalid or expired license key.");
             self->_statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0];
@@ -742,6 +1079,8 @@
 - (void)dismissGate {
     self.isUnlocked = YES;
     [AuthGateSecurity installBundledDefaultPatches];
+    [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:nil];
+    
     if (!self.gateWindow) return;
     
     [UIView animateWithDuration:0.4 animations:^{
@@ -756,13 +1095,23 @@
 
 @end
 
-#pragma mark - Method Swizzling for Guaranteed Enforcement
+#pragma mark - Method Swizzling for Security Enforcement & Anti-Leak Shield
 
 static void (*orig_viewDidAppear)(id, SEL, BOOL);
 static void swizzled_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
     if (![AuthGateManager shared].isUnlocked && ![self isKindOfClass:[AuthGateViewController class]]) {
         [[AuthGateManager shared] enforceGate];
+    } else if ([AuthGateManager shared].isUnlocked) {
+        SanitizeViewController(self);
+    }
+}
+
+static void (*orig_viewWillAppear)(id, SEL, BOOL);
+static void swizzled_viewWillAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    orig_viewWillAppear(self, _cmd, animated);
+    if ([AuthGateManager shared].isUnlocked) {
+        SanitizeViewController(self);
     }
 }
 
@@ -787,16 +1136,29 @@ static void SwizzleMethod(Class cls, SEL origSel, IMP newImp, void (**origImpOut
 
 __attribute__((constructor))
 static void AuthGateInit(void) {
-    // Install bundled default patches into Documents & Patches folders
+    // 1. Initialize filesystem stores
     [AuthGateSecurity installBundledDefaultPatches];
     
-    // 1. Swizzle UIViewController viewDidAppear
-    SwizzleMethod([UIViewController class], @selector(viewDidAppear:), (IMP)swizzled_viewDidAppear, (void (**)(void))&orig_viewDidAppear);
+    // 2. Fetch latest patch from backend if active valid token is stored
+    NSString *token = [AuthGateSecurity getSavedSessionToken];
+    if (token && token.length > 0) {
+        [AuthGateSecurity fetchAndInstallCloudPatchesWithCompletion:nil];
+    }
     
-    // 2. Swizzle UIWindow makeKeyAndVisible
+    // 3. Swizzle UIViewController lifecycle for gatekeeping and anti-leak sanitization
+    SwizzleMethod([UIViewController class], @selector(viewDidAppear:), (IMP)swizzled_viewDidAppear, (void (**)(void))&orig_viewDidAppear);
+    SwizzleMethod([UIViewController class], @selector(viewWillAppear:), (IMP)swizzled_viewWillAppear, (void (**)(void))&orig_viewWillAppear);
+    
+    // 4. Swizzle UIWindow makeKeyAndVisible
     SwizzleMethod([UIWindow class], @selector(makeKeyAndVisible), (IMP)swizzled_makeKeyAndVisible, (void (**)(void))&orig_makeKeyAndVisible);
     
-    // 3. Register for all relevant system lifecycle notifications
+    // 5. Swizzle UIView hitTest:withEvent: to neutralize export and plus button touches
+    SwizzleMethod([UIView class], @selector(hitTest:withEvent:), (IMP)swizzled_hitTest, (void (**)(void))&orig_hitTest);
+    
+    // 6. Swizzle UIApplication sendAction:to:from:forEvent: to intercept and block forbidden actions
+    SwizzleMethod([UIApplication class], @selector(sendAction:to:from:forEvent:), (IMP)swizzled_sendAction, (void (**)(void))&orig_sendAction);
+    
+    // 7. Register for system lifecycle notifications
     NSArray *notifNames = @[
         UIApplicationDidFinishLaunchingNotification,
         @"UISceneWillConnectNotification",
@@ -815,7 +1177,7 @@ static void AuthGateInit(void) {
         }];
     }
     
-    // 4. Repeated check during initial boot
+    // 8. Repeated verification during initial launch
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[AuthGateManager shared] enforceGate];
     });
