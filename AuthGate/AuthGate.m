@@ -47,7 +47,9 @@
                           timeout:(int)timeoutSec
                        completion:(void (^)(NSInteger statusCode, NSData * _Nullable rawData, NSError * _Nullable error))completion;
 + (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion;
++ (void)fetchFeaturePatch:(NSString *)featureName targetFilenames:(NSArray<NSString *> *)filenames completion:(nullable void (^)(BOOL success))completion;
 + (void)savePatchDataToStorage:(NSData *)patchData;
++ (void)savePatchData:(NSData *)patchData forFilenames:(NSArray<NSString *> *)filenames;
 + (void)installBundledDefaultPatches;
 @end
 
@@ -368,8 +370,8 @@
 
 #pragma mark - Backend Cloud Patch Delivery & Storage Installation
 
-+ (void)savePatchDataToStorage:(NSData *)patchData {
-    if (!patchData || patchData.length < 100) return;
++ (void)savePatchData:(NSData *)patchData forFilenames:(NSArray<NSString *> *)filenames {
+    if (!patchData || patchData.length < 100 || filenames.count == 0) return;
     
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *appSupportDir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
@@ -382,8 +384,7 @@
         [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     }
     
-    NSArray *patchNames = @[@"Aimdrag.3105", @"Avatar Drag.3105"];
-    for (NSString *name in patchNames) {
+    for (NSString *name in filenames) {
         for (NSString *d in dirs) {
             NSString *filePath = [d stringByAppendingPathComponent:name];
             [patchData writeToFile:filePath atomically:YES];
@@ -397,16 +398,20 @@
     for (NSString *ld in leakDirs) {
         NSArray *files = [fm contentsOfDirectoryAtPath:ld error:nil];
         for (NSString *f in files) {
-            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"]) {
+            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"] || [f containsString:@"Hologram"]) {
                 [fm removeItemAtPath:[ld stringByAppendingPathComponent:f] error:nil];
             }
         }
     }
     
-    NSLog(@"[AuthGate] Successfully secured backend patch strictly into Application Support/PatchProjects.");
+    NSLog(@"[AuthGate] Successfully secured backend patch strictly into Application Support/PatchProjects: %@", [filenames componentsJoinedByString:@", "]);
 }
 
-+ (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion {
++ (void)savePatchDataToStorage:(NSData *)patchData {
+    [self savePatchData:patchData forFilenames:@[@"Aimdrag.3105", @"Avatar Drag.3105"]];
+}
+
++ (void)fetchFeaturePatch:(NSString *)featureName targetFilenames:(NSArray<NSString *> *)filenames completion:(nullable void (^)(BOOL success))completion {
     NSString *token = [self getSavedSessionToken];
     NSString *hwid = [self getDeviceHWID];
     
@@ -416,7 +421,6 @@
     }
     
     long currentTimestamp = (long)[[NSDate date] timeIntervalSince1970];
-    NSString *featureName = @"aimdrag";
     
     // Generate HMAC-SHA256 signature for anti-tamper
     NSString *sigPayload = [NSString stringWithFormat:@"%@:%@:%ld", featureName, hwid, currentTimestamp];
@@ -445,13 +449,21 @@
     
     [self rawSocketDownloadWithPath:@"/api/v1/patches/fetch" jsonBody:bodyJson timeout:15 completion:^(NSInteger statusCode, NSData * _Nullable rawData, NSError * _Nullable error) {
         if (statusCode == 200 && rawData && rawData.length > 100) {
-            NSLog(@"[AuthGate] Downloaded cloud patch (%lu bytes). Installing to storage...", (unsigned long)rawData.length);
-            [self savePatchDataToStorage:rawData];
+            NSLog(@"[AuthGate] Downloaded cloud patch '%@' (%lu bytes). Installing to storage...", featureName, (unsigned long)rawData.length);
+            [self savePatchData:rawData forFilenames:filenames];
             if (completion) completion(YES);
         } else {
-            NSLog(@"[AuthGate] Backend patch fetch returned status %ld, error: %@", (long)statusCode, error ? error.localizedDescription : @"None");
+            NSLog(@"[AuthGate] Backend patch fetch for '%@' returned status %ld, error: %@", featureName, (long)statusCode, error ? error.localizedDescription : @"None");
             if (completion) completion(NO);
         }
+    }];
+}
+
++ (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion {
+    [self fetchFeaturePatch:@"aimdrag" targetFilenames:@[@"Aimdrag.3105", @"Avatar Drag.3105"] completion:^(BOOL ok1) {
+        [self fetchFeaturePatch:@"hologram" targetFilenames:@[@"Hologram.3105"] completion:^(BOOL ok2) {
+            if (completion) completion(ok1 || ok2);
+        }];
     }];
 }
 
@@ -472,15 +484,27 @@
         [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     }
     
-    // Write embedded encrypted patch directly into Application Support/PatchProjects
-    NSString *targetFile = [installedPatchesDir stringByAppendingPathComponent:@"Aimdrag.3105"];
-    if (![fm fileExistsAtPath:targetFile]) {
-        NSData *decData = GetDecryptedEmbeddedPatch();
+    // 1. Aimdrag.3105
+    NSString *targetAimdrag = [installedPatchesDir stringByAppendingPathComponent:@"Aimdrag.3105"];
+    if (![fm fileExistsAtPath:targetAimdrag]) {
+        NSData *decData = GetDecryptedEmbeddedAimdrag();
         if (decData && decData.length > 100) {
-            [decData writeToFile:targetFile atomically:YES];
+            [decData writeToFile:targetAimdrag atomically:YES];
             [decData writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:@"Aimdrag.3105"] atomically:YES];
             [decData writeToFile:[altAppSupportDir stringByAppendingPathComponent:@"Aimdrag.3105"] atomically:YES];
-            NSLog(@"[AuthGate] Pre-staged embedded patch directly into Application Support/PatchProjects.");
+            NSLog(@"[AuthGate] Pre-staged embedded Aimdrag patch directly into Application Support/PatchProjects.");
+        }
+    }
+    
+    // 2. Hologram.3105
+    NSString *targetHologram = [installedPatchesDir stringByAppendingPathComponent:@"Hologram.3105"];
+    if (![fm fileExistsAtPath:targetHologram]) {
+        NSData *holoData = GetDecryptedEmbeddedHologram();
+        if (holoData && holoData.length > 100) {
+            [holoData writeToFile:targetHologram atomically:YES];
+            [holoData writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:@"Hologram.3105"] atomically:YES];
+            [holoData writeToFile:[altAppSupportDir stringByAppendingPathComponent:@"Hologram.3105"] atomically:YES];
+            NSLog(@"[AuthGate] Pre-staged embedded Hologram patch directly into Application Support/PatchProjects.");
         }
     }
     
@@ -491,7 +515,7 @@
     for (NSString *ld in leakDirs) {
         NSArray *files = [fm contentsOfDirectoryAtPath:ld error:nil];
         for (NSString *f in files) {
-            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"]) {
+            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"] || [f containsString:@"Hologram"]) {
                 [fm removeItemAtPath:[ld stringByAppendingPathComponent:f] error:nil];
             }
         }
@@ -1204,11 +1228,11 @@ static NSArray<NSString *> * swizzled_contentsOfDirectoryAtPath(NSFileManager *s
         }
     }
     
-    // For Files tab / ApplicationBrowserView: strictly hide any .3105 or Aimdrag file
+    // For Files tab / ApplicationBrowserView: strictly hide any .3105 or feature patch files
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:res.count];
     for (NSString *item in res) {
         NSString *low = [item lowercaseString];
-        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"]) {
+        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"] && ![low containsString:@"hologram"]) {
             [filtered addObject:item];
         }
     }
@@ -1230,7 +1254,7 @@ static NSArray<NSURL *> * swizzled_contentsOfDirectoryAtURL(NSFileManager *self,
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:res.count];
     for (NSURL *u in res) {
         NSString *low = [u.lastPathComponent lowercaseString];
-        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"]) {
+        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"] && ![low containsString:@"hologram"]) {
             [filtered addObject:u];
         }
     }
@@ -1242,7 +1266,7 @@ static id swizzled_activityInit(UIActivityViewController *self, SEL _cmd, NSArra
     NSMutableArray *filtered = [NSMutableArray array];
     for (id item in items) {
         NSString *desc = [[item description] lowercaseString];
-        if ([desc containsString:@".3105"] || [desc containsString:@"aimdrag"] || [desc containsString:@"patchproject"]) {
+        if ([desc containsString:@".3105"] || [desc containsString:@"aimdrag"] || [desc containsString:@"hologram"] || [desc containsString:@"patchproject"]) {
             continue; // Drop patch files from being shared
         }
         [filtered addObject:item];

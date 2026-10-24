@@ -105,7 +105,7 @@ jobs:
 
           # 4b. Anti-Leak: Ensure NO .3105 files or Patches directory exist in 3105.app bundle
           # The patch is embedded securely inside AuthGate.dylib and delivered to Application Support/PatchProjects only
-          for leak_item in ['Aimdrag.3105', 'Avatar Drag.3105', 'Patches']:
+          for leak_item in ['Aimdrag.3105', 'Avatar Drag.3105', 'Hologram.3105', 'Patches']:
               p = os.path.join(app_dir, leak_item)
               if os.path.exists(p):
                   if os.path.isdir(p):
