@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, ForeignKey, Numeric
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
@@ -33,7 +33,15 @@ class License(Base):
     expires_at = Column(DateTime, nullable=True) # Calculated as activated_at + duration_days upon first activation; None = Lifetime
     notes = Column(String(255), default="Standard User Key")
     
+    # Reseller & Customer association
+    seller_id = Column(Integer, ForeignKey("resellers.id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    generated_by = Column(String(50), default="admin") # "admin" or "reseller"
+    pricing_tier = Column(String(20), nullable=True) # e.g. "7d", "15d", "30d"
+    
     devices = relationship("Device", back_populates="license", uselist=False)
+    reseller = relationship("Reseller", back_populates="licenses", foreign_keys=[seller_id])
+    customer = relationship("Customer", back_populates="licenses", foreign_keys=[customer_id])
 
     @property
     def is_expired(self) -> bool:
@@ -85,11 +93,11 @@ class SystemConfig(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     app_status = Column(String(20), default="ACTIVE")
-    app_version = Column(String(32), default="1.1.3")
+    app_version = Column(String(32), default="1.1.4")
     force_update = Column(Boolean, default=False)
     maintenance_message = Column(String(255), default="Server maintenance is currently in progress. Please check Discord announcements for status updates: https://discord.gg/KPJzd42rme")
-    release_notes = Column(Text, default="Official Release v1.1.3: Performance optimizations, enhanced session security, and dynamic cloud delivery.")
-    download_url = Column(String(255), default="https://github.com/nicchen0xf/Swift-ios/releases")
+    release_notes = Column(Text, default="Official Release v1.1.4: Enhanced security protocols, updated dynamic cloud patches, and ultra-smooth engine performance.")
+    download_url = Column(String(255), default="https://github.com/nicchen0xf/Swift-ios/releases/download/v1.1.4/ByteExternal_V1.1.4.ipa")
     updated_at = Column(DateTime, default=utc_now)
 
 
@@ -119,11 +127,124 @@ class UserReleaseAcknowledgment(Base):
     license_key = Column(String(64), nullable=True, index=True)
     seen_at = Column(DateTime, default=utc_now)
 
+class Reseller(Base):
+    __tablename__ = "resellers"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    display_name = Column(String(100), nullable=False)
+    email = Column(String(120), nullable=True)
+    status = Column(String(20), default="active", index=True) # "active", "suspended", "inactive"
+    credit_balance = Column(Numeric(12, 4), default=0.0000, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    last_login_at = Column(DateTime, nullable=True)
+    notes = Column(String(255), nullable=True)
+    created_by = Column(String(50), default="admin")
+    
+    customers = relationship("Customer", back_populates="reseller", cascade="all, delete-orphan")
+    ledger_entries = relationship("CreditLedger", back_populates="reseller", cascade="all, delete-orphan")
+    licenses = relationship("License", back_populates="reseller", foreign_keys="[License.seller_id]")
+
+class Customer(Base):
+    __tablename__ = "customers"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    seller_id = Column(Integer, ForeignKey("resellers.id"), nullable=False, index=True)
+    customer_code = Column(String(64), unique=True, index=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    contact = Column(String(120), nullable=True) # Discord, Telegram, or email
+    status = Column(String(20), default="active", index=True) # "active", "suspended"
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    
+    reseller = relationship("Reseller", back_populates="customers")
+    licenses = relationship("License", back_populates="customer", foreign_keys="[License.customer_id]")
+
+class CreditLedger(Base):
+    __tablename__ = "credit_ledger"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    transaction_id = Column(String(64), unique=True, index=True, nullable=False)
+    seller_id = Column(Integer, ForeignKey("resellers.id"), nullable=False, index=True)
+    transaction_type = Column(String(40), nullable=False, index=True) # "ADMIN_ALLOCATE", "ADMIN_DEDUCT", "KEY_GENERATE", "REVERSAL", "ADMIN_CORRECTION"
+    amount = Column(Numeric(12, 4), nullable=False) # signed: e.g. +10.0000 or -0.5000
+    balance_before = Column(Numeric(12, 4), nullable=False)
+    balance_after = Column(Numeric(12, 4), nullable=False)
+    description = Column(String(255), nullable=False)
+    related_key = Column(String(64), nullable=True, index=True)
+    related_customer_id = Column(Integer, nullable=True)
+    initiated_by = Column(String(64), nullable=False) # e.g. "admin" or seller username
+    timestamp = Column(DateTime, default=utc_now, index=True)
+    status = Column(String(20), default="COMPLETED", index=True) # "COMPLETED", "REVERSED"
+    idempotency_key = Column(String(128), nullable=True, index=True)
+    correlation_id = Column(String(64), nullable=True, index=True)
+    
+    reseller = relationship("Reseller", back_populates="ledger_entries")
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(128), unique=True, index=True, nullable=False)
+    seller_id = Column(Integer, nullable=False, index=True)
+    endpoint = Column(String(100), nullable=False)
+    response_status = Column(Integer, nullable=False)
+    response_body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+
 # Async engine & session
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+def preflight_database_health():
+    import sqlite3, shutil, time, os
+    db_url = settings.DATABASE_URL
+    if "sqlite" not in db_url:
+        return
+    path_part = db_url.split(":///")[-1] if ":///" in db_url else ""
+    db_path = path_part.lstrip("./") if path_part.startswith("./") else path_part
+    if not db_path:
+        db_path = "auth_gateway.db"
+
+    is_corrupt = False
+    if os.path.exists(db_path):
+        con = None
+        try:
+            con = sqlite3.connect(db_path, timeout=5.0)
+            res = con.execute("PRAGMA quick_check").fetchone()
+            if not (res and res[0] == "ok"):
+                is_corrupt = True
+        except Exception:
+            is_corrupt = True
+        finally:
+            if con:
+                try: con.close()
+                except Exception: pass
+
+    if is_corrupt:
+        broken_backup = f"{db_path}.malformed_{int(time.time())}"
+        try: shutil.copy2(db_path, broken_backup)
+        except Exception: pass
+        for ext in ["", "-wal", "-shm"]:
+            f = db_path + ext
+            if os.path.exists(f):
+                try: os.remove(f)
+                except Exception: pass
+        sql_dump = "auth_gateway.sql"
+        if os.path.exists(sql_dump):
+            try:
+                con = sqlite3.connect(db_path)
+                with open(sql_dump, "r", encoding="utf-8") as f:
+                    con.executescript(f.read())
+                con.execute("PRAGMA journal_mode = DELETE;")
+                con.execute("VACUUM;")
+                con.close()
+            except Exception:
+                pass
+
 async def init_db():
+    preflight_database_health()
     async with engine.begin() as conn:
         from sqlalchemy import text
         try:
@@ -138,6 +259,27 @@ async def init_db():
             pass
         try:
             await conn.execute(text("ALTER TABLE licenses ADD COLUMN duration_days INTEGER DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN seller_id INTEGER DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN customer_id INTEGER DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN generated_by VARCHAR(50) DEFAULT 'admin'"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE licenses ADD COLUMN pricing_tier VARCHAR(20) DEFAULT NULL"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_licenses_seller_id ON licenses(seller_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_licenses_customer_id ON licenses(customer_id)"))
         except Exception:
             pass
         try:
@@ -175,7 +317,7 @@ async def init_db():
         if not config:
             config = SystemConfig(
                 app_status="ACTIVE",
-                app_version="1.1.3",
+                app_version="1.1.4",
                 force_update=False,
                 updated_at=utc_now()
             )

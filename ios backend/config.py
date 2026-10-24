@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
     ADMIN_SESSION_COOKIE: str = "auth_admin_session_3105"
+    SELLER_SESSION_COOKIE: str = "auth_seller_session_3105"
+    SELLER_TOKEN_EXPIRE_MINUTES: int = 1440
     ADMIN_COOKIE_SECURE: bool = os.getenv("COOKIE_SECURE", "false").lower() in ("true", "1")
     
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./auth_gateway.db")

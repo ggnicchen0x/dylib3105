@@ -4159,9 +4159,9 @@ class LoginRequest(BaseModel):
 class ValidateRequest(BaseModel):
     token: str
     device_hash: str
-    app_version: Optional[str] = "1.1.4"
-    timestamp: Optional[int] = None
-    signature: Optional[str] = None
+    app_version: str = "1.1.2"
+    timestamp: int
+    signature: str
 
 @app.get("/")
 async def root():
@@ -4175,29 +4175,20 @@ async def health():
 @app.post("/api/v1/auth/version-check")
 @app.get("/api/v2/auth/version-check")
 @app.post("/api/v2/auth/version-check")
-async def check_app_version(request: Request, db: AsyncSession = Depends(get_db)):
+async def check_app_version(db: AsyncSession = Depends(get_db)):
     res_cfg = await db.execute(select(SystemConfig))
     cfg = res_cfg.scalars().first()
-    raw_cfg_ver = cfg.app_version.strip() if (cfg and cfg.app_version) else "1.1.4"
+    required_ver = cfg.app_version.strip() if (cfg and cfg.app_version) else "1.1.2"
     force_update = cfg.force_update if cfg else False
-    notes = cfg.release_notes.strip() if (cfg and cfg.release_notes and cfg.release_notes.strip()) else "Official Release: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery."
+    notes = cfg.release_notes.strip() if (cfg and cfg.release_notes and cfg.release_notes.strip()) else "Official Release v1.1.2: Added Visuals (Hologram Location Exposed), Aim Drag, 144 FPS Unlock, Aim Body, and Magic Bullet with ultra-smooth engine performance and dynamic cloud delivery."
     download_url = cfg.download_url if (cfg and cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
     app_status = cfg.app_status if cfg else "ACTIVE"
     maint_msg = cfg.maintenance_message.strip() if (cfg and cfg.maintenance_message and cfg.maintenance_message.strip()) else "Panel is Under Maintainance."
-
-    is_v2_request = request.url.path.startswith("/api/v2/")
-    if is_v2_request:
-        effective_ver = raw_cfg_ver if raw_cfg_ver.startswith("2.") else "2.0.0"
-        effective_force = force_update if raw_cfg_ver.startswith("2.") else False
-    else:
-        effective_ver = raw_cfg_ver if raw_cfg_ver.startswith("1.") else "1.1.4"
-        effective_force = force_update if raw_cfg_ver.startswith("1.") else False
-
     return {
         "app_status": app_status,
         "maintenance_message": maint_msg,
-        "latest_version": effective_ver,
-        "force_update": effective_force,
+        "latest_version": required_ver,
+        "force_update": force_update,
         "release_notes": notes,
         "download_url": download_url
     }
@@ -4513,7 +4504,17 @@ async def validate_heartbeat(req: ValidateRequest, request: Request, db: AsyncSe
     # Rate Limiting on Validation: max 60 per minute
     check_endpoint_rate_limit(f"val:{req.device_hash.strip()}:{client_ip}", settings.RATE_LIMIT_VALIDATE_MAX, 60)
     
-    # Simultaneous Protocol Support: v1 and v2 both operate concurrently
+    # 0. Controlled Protocol v1 Retirement Check
+    if request.url.path.startswith("/api/v1/") and not getattr(settings, "ENABLE_V1_PROTOCOL", True):
+        return JSONResponse(
+            status_code=status.HTTP_410_GONE,
+            content={
+                "error": "protocol_retired",
+                "detail": "Protocol v1 validation has been retired. Please update to iOS client v2."
+            },
+            headers={"X-API-Deprecation": "protocol=v1; status=retired; upgrade=/api/v2/auth/validate"}
+        )
+
     res_cfg = await db.execute(select(SystemConfig))
     cfg = res_cfg.scalars().first()
     if cfg and cfg.app_status == "PAUSED":
@@ -4529,33 +4530,29 @@ async def validate_heartbeat(req: ValidateRequest, request: Request, db: AsyncSe
         )
         
     if cfg:
-        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.4"
-        client_ver = req.app_version.strip() if req.app_version else ("2.0.0" if request.url.path.startswith("/api/v2/") else "1.1.4")
+        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.2"
+        client_ver = req.app_version.strip() if req.app_version else "1.1.2"
         def parse_v(v: str):
             try:
                 parts = v.lower().replace('v', '').split('.')
                 return tuple(int(x) for x in parts if x.isdigit())
             except Exception:
                 return (0, 0, 0)
-        c_parts = parse_v(client_ver)
-        r_parts = parse_v(required_ver)
-        # Isolate protocol families: v1 (1.x) and v2 (2.x) operate simultaneously without interference
-        if c_parts and r_parts and c_parts[0] == r_parts[0]:
-            is_mismatch = (client_ver != required_ver)
-            is_older = (c_parts < r_parts)
-            if (cfg.force_update and is_mismatch) or is_older:
-                notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
-                download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
-                return JSONResponse(
-                    status_code=status.HTTP_426_UPGRADE_REQUIRED,
-                    content={
-                        "error": "update_required",
-                        "latest_version": required_ver,
-                        "release_notes": notes,
-                        "download_url": download_url,
-                        "detail": notes
-                    }
-                )
+        is_mismatch = (client_ver != required_ver)
+        is_older = (parse_v(client_ver) < parse_v(required_ver))
+        if (cfg.force_update and is_mismatch) or is_older:
+            notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
+            download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchennnnn/External/releases"
+            return JSONResponse(
+                status_code=status.HTTP_426_UPGRADE_REQUIRED,
+                content={
+                    "error": "update_required",
+                    "latest_version": required_ver,
+                    "release_notes": notes,
+                    "download_url": download_url,
+                    "detail": notes
+                }
+            )
 
     payload = decode_access_token(req.token)
     if not payload:
@@ -4613,18 +4610,17 @@ async def validate_heartbeat(req: ValidateRequest, request: Request, db: AsyncSe
 # 9.1 SECURE DYNAMIC CLOUD PATCH DELIVERY ENDPOINTS
 # -------------------------------------------------------------
 class PatchFetchRequest(BaseModel):
-    feature_name: str = Field(..., description="Feature identifier: 'avatar', 'aimdrag', '144', 'magic', 'aimbody'")
+    feature_name: str = Field(..., description="Feature identifier: 'avatar', '144', 'magic', 'aimbody'")
     token: str = Field(..., description="JWT session token")
     device_hash: str = Field(..., description="Device HWID hash")
-    timestamp: Optional[int] = Field(default=None, description="UNIX epoch seconds for anti-replay")
-    signature: Optional[str] = Field(default=None, description="HMAC-SHA256 signature of 'feature_name:device_hash:timestamp'")
-    app_version: Optional[str] = Field(default=None, description="Client iOS App Version")
+    timestamp: int = Field(..., description="UNIX epoch seconds for anti-replay")
+    signature: str = Field(..., description="HMAC-SHA256 signature of 'feature_name:device_hash:timestamp'")
+    app_version: Optional[str] = Field(default="1.1.4", description="Client iOS App Version")
 
 FEATURE_FILE_MAP = {
     "aimdrag": "Aimdrag.3105",
-    "aim_drag": "Aimdrag.3105",
     "avatar": "Avatar Drag.3105",
-    "avatar_drag": "Avatar Drag.3105",
+    "aim_drag": "Avatar Drag.3105",
     "avatar_cs": "Avatar Drag.3105",
     "aim_drag_cs": "Avatar Drag.3105",
     "avatar_rooms": "Avatar DragP.3105",
@@ -4647,7 +4643,6 @@ FEATURE_FILE_MAP = {
     "spider": "Mod_Spider.3105",
     "mod_gojo": "Mod_Gojo.3105",
     "gojo": "Mod_Gojo.3105",
-    "mod gojo": "Mod Gojo.3105",
 }
 
 @app.post("/api/v1/patches/fetch")
@@ -4659,6 +4654,17 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     
     # Rate Limiting on Binary Patch Downloads: max 15 per minute
     check_endpoint_rate_limit(f"patch:{device_hash_clean}:{client_ip}", settings.RATE_LIMIT_PATCH_FETCH_MAX, 60)
+    
+    # 0. Controlled Protocol v1 Retirement Check
+    if request.url.path.startswith("/api/v1/") and not getattr(settings, "ENABLE_V1_PROTOCOL", True):
+        return JSONResponse(
+            status_code=status.HTTP_410_GONE,
+            content={
+                "error": "protocol_retired",
+                "detail": "Protocol v1 patch delivery has been retired. Please update to iOS client v2."
+            },
+            headers={"X-API-Deprecation": "protocol=v1; status=retired; upgrade=/api/v2/patches/fetch"}
+        )
 
     # 1. Maintenance / Killswitch Check
     res_cfg = await db.execute(select(SystemConfig))
@@ -4675,11 +4681,10 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
             }
         )
 
-    # 2. Dynamic App Version Check & Force-Update Policy (Branch-Isolated: v1 and v2 operate simultaneously)
+    # 2. Dynamic App Version Check & Force-Update Policy
     if cfg:
         required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.4"
-        is_v2 = request.url.path.startswith("/api/v2/")
-        client_ver = (req.app_version or ("2.0.0" if is_v2 else "1.1.4")).strip()
+        client_ver = (req.app_version or "1.1.4").strip()
         
         def parse_v(v: str):
             try:
@@ -4688,40 +4693,38 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
             except Exception:
                 return (0, 0, 0)
                 
-        c_parts = parse_v(client_ver)
-        r_parts = parse_v(required_ver)
+        is_mismatch = (client_ver != required_ver)
+        is_older = (parse_v(client_ver) < parse_v(required_ver))
         
-        # Isolate protocol families: v1 (1.x) and v2 (2.x) operate simultaneously without interference
-        if c_parts and r_parts and c_parts[0] == r_parts[0]:
-            is_mismatch = (client_ver != required_ver)
-            is_older = (c_parts < r_parts)
-            
-            # Only block patch download if administrator explicitly enabled force_update
-            if cfg.force_update and is_older:
-                notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
-                download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
-                return JSONResponse(
-                    status_code=status.HTTP_426_UPGRADE_REQUIRED,
-                    content={
-                        "error": "update_required",
-                        "latest_version": required_ver,
-                        "release_notes": notes,
-                        "download_url": download_url,
-                        "detail": notes
-                    }
-                )
+        if (cfg.force_update and is_mismatch) or is_older:
+            notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
+            download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
+            return JSONResponse(
+                status_code=status.HTTP_426_UPGRADE_REQUIRED,
+                content={
+                    "error": "update_required",
+                    "latest_version": required_ver,
+                    "release_notes": notes,
+                    "download_url": download_url,
+                    "detail": notes
+                }
+            )
         
-    # 3. Anti-Replay & HMAC Signature Check
+    # 3. Anti-Replay & HMAC Signature Check ('feature_name:device_hash:timestamp')
     current_time = int(time.time())
-    if req.timestamp is not None:
-        if abs(current_time - req.timestamp) > 600:
-            logger.warning("Clock drift on patch fetch: device=%s, delta=%d", device_hash_clean, abs(current_time - req.timestamp))
+    if abs(current_time - req.timestamp) > 90:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request timestamp expired. Please check device clock."
+        )
         
-    if req.signature and req.timestamp is not None:
-        sig_payload = f"{feature_key}:{device_hash_clean}:{req.timestamp}"
-        if not verify_hmac_signature(sig_payload, req.signature.strip()):
-            if not request.url.path.startswith("/api/v2/"):
-                logger.warning("HMAC signature mismatch for feature %s, relying on verified session token", feature_key)
+    sig_payload = f"{feature_key}:{device_hash_clean}:{req.timestamp}"
+    if not verify_hmac_signature(sig_payload, req.signature.strip()):
+        if not request.url.path.startswith("/api/v2/"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid patch delivery signature (HMAC Tamper Triggered)."
+            )
         
     # 4. Session JWT Token Validation & HWID Binding
     payload = decode_access_token(req.token)
@@ -4759,19 +4762,12 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     if lic.bound_device_hash and lic.bound_device_hash != device_hash_clean:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="License key is locked to another hardware device.")
         
-    # 6. Resolve Target Patch File with Strict Path Traversal Prevention
-    base_storage = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "patches")))
+    # 5. Resolve Target Patch File with Strict Path Traversal Prevention
     patch_filename = FEATURE_FILE_MAP.get(feature_key)
-    
-    if not patch_filename and os.path.exists(base_storage):
-        for fname in os.listdir(base_storage):
-            if fname.lower() == feature_key or fname.lower() == f"{feature_key}.3105":
-                patch_filename = fname
-                break
-                
     if not patch_filename:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Feature '{req.feature_name}' not found.")
         
+    base_storage = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "patches")))
     patch_path = os.path.realpath(os.path.abspath(os.path.join(base_storage, patch_filename)))
     
     # Path Traversal Guard: canonical target must reside inside base_storage (Symlink safe)
@@ -4796,7 +4792,7 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     db.add(log)
     await db.commit()
     
-    # Stream Binary Data with Integrity Headers
+    # 6. Stream Binary Data with Integrity Headers
     file_hash = hashlib.sha256(patch_bytes).hexdigest()
     resp_sig = sign_payload(f"{feature_key}:{file_hash}:{current_time}")
     
@@ -4812,13 +4808,11 @@ async def fetch_patch(req: PatchFetchRequest, request: Request, db: AsyncSession
     )
 
 @app.get("/api/v1/patches/catalog")
-@app.get("/api/v2/patches/catalog")
 async def list_available_patches():
     return {
         "status": "available",
         "features": [
-            {"id": "aimdrag", "name": "Aim Drag", "file": "Aimdrag.3105"},
-            {"id": "avatar", "name": "Avatar Drag", "file": "Avatar Drag.3105"},
+            {"id": "avatar", "name": "Aim Drag", "file": "Avatar Drag.3105"},
             {"id": "avatar_cs", "name": "Aim Drag (CS Rank)", "file": "Avatar Drag.3105"},
             {"id": "avatar_rooms", "name": "Aim Drag (Rooms)", "file": "Avatar DragP.3105"},
             {"id": "144", "name": "144 FPS Unlock", "file": "144 FPS.3105"},
@@ -4905,10 +4899,10 @@ async def login_v2(req: V2LoginRequest, request: Request, db: AsyncSession = Dep
             }
         )
         
-    # 2. App Version & Update Enforcement Check (Branch-Isolated: strictly validates 2.x family)
+    # 2. App Version & Update Enforcement Check
     if cfg:
-        required_ver = cfg.app_version.strip() if cfg.app_version else "2.0.0"
-        client_ver = req.app_version.strip() if req.app_version else "2.0.0"
+        required_ver = cfg.app_version.strip() if cfg.app_version else "1.1.4"
+        client_ver = req.app_version.strip() if req.app_version else "1.1.4"
         
         def parse_v(v: str):
             try:
@@ -4917,27 +4911,22 @@ async def login_v2(req: V2LoginRequest, request: Request, db: AsyncSession = Dep
             except Exception:
                 return (0, 0, 0)
                 
-        c_parts = parse_v(client_ver)
-        r_parts = parse_v(required_ver)
+        is_mismatch = (client_ver != required_ver)
+        is_older = (parse_v(client_ver) < parse_v(required_ver))
         
-        # Only enforce update if both are within the same major version family (2.x)
-        if c_parts and r_parts and c_parts[0] == r_parts[0] and c_parts[0] == 2:
-            is_mismatch = (client_ver != required_ver)
-            is_older = (c_parts < r_parts)
-            
-            if (cfg.force_update and is_mismatch) or is_older:
-                notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
-                download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
-                return JSONResponse(
-                    status_code=status.HTTP_426_UPGRADE_REQUIRED,
-                    content={
-                        "error": "update_required",
-                        "latest_version": required_ver,
-                        "release_notes": notes,
-                        "download_url": download_url,
-                        "detail": notes
-                    }
-                )
+        if (cfg.force_update and is_mismatch) or is_older:
+            notes = cfg.release_notes.strip() if (cfg.release_notes and cfg.release_notes.strip()) else "A new update is available."
+            download_url = cfg.download_url if (cfg.download_url and cfg.download_url.strip()) else "https://github.com/nicchen0xf/Swift-ios/releases"
+            return JSONResponse(
+                status_code=status.HTTP_426_UPGRADE_REQUIRED,
+                content={
+                    "error": "update_required",
+                    "latest_version": required_ver,
+                    "release_notes": notes,
+                    "download_url": download_url,
+                    "detail": notes
+                }
+            )
 
     # 3. Dual-Layer 10-Minute Timeout Jail Rate Limiter (5 attempts / 60s)
     try:

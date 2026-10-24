@@ -12,3 +12,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Scratch & Extraction
+extracted_app/
+scratch*.py
+*.zip
+*.sql
+*.db
+*.sqlite

@@ -968,10 +968,26 @@ static void SanitizeViewController(UIViewController *vc) {
     _statusLabel.textColor = [UIColor colorWithRed:0.60 green:0.75 blue:0.95 alpha:1.0];
     _statusLabel.text = @"Checking saved license...";
     
+    long currentTimestamp = (long)[[NSDate date] timeIntervalSince1970];
+    NSString *hwid = [AuthGateSecurity getDeviceHWID];
+    
+    // Compute HMAC-SHA256 signature: payload = "license_key:device_hash:timestamp"
+    NSString *sigPayload = [NSString stringWithFormat:@"%@:%@:%ld", savedKey, hwid, currentTimestamp];
+    const char *keyStr = [CLOUD_HMAC_SECRET UTF8String];
+    const char *dataStr = [sigPayload UTF8String];
+    unsigned char cHMAC[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, keyStr, strlen(keyStr), dataStr, strlen(dataStr), cHMAC);
+    NSMutableString *hexSig = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [hexSig appendFormat:@"%02x", cHMAC[i]];
+    }
+    
     NSDictionary *body = @{
         @"token": savedToken,
-        @"device_hash": [AuthGateSecurity getDeviceHWID],
-        @"app_version": AUTHGATE_VERSION
+        @"device_hash": hwid,
+        @"app_version": AUTHGATE_VERSION,
+        @"timestamp": @(currentTimestamp),
+        @"signature": [hexSig copy]
     };
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     NSString *bodyJson = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
