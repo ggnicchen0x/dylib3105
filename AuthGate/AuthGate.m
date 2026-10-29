@@ -23,7 +23,7 @@
 #define DEFAULT_SERVER_HOST @"fi9.bot-hosting.cloud"
 #define DEFAULT_SERVER_IP @"95.216.12.48"
 #define DEFAULT_SERVER_PORT 25808
-#define DISCORD_URL @"https://discord.gg/KPJzd42rme"
+#define DISCORD_URL @"https://www.instagram.com/kazi_2.1?cplk=MWt6dDV0NXJ6cnU3Yw%3D%3D&utm_source=qr"
 #define KEYCHAIN_SERVICE @"com.authgate.session.service"
 #define KEYCHAIN_ACCOUNT_KEY @"com.authgate.license.key"
 #define KEYCHAIN_ACCOUNT_TOKEN @"com.authgate.session.token"
@@ -398,7 +398,7 @@
     for (NSString *ld in leakDirs) {
         NSArray *files = [fm contentsOfDirectoryAtPath:ld error:nil];
         for (NSString *f in files) {
-            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"] || [f containsString:@"Hologram"]) {
+            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] && ([f containsString:@"Aimdrag"] || [f containsString:@"Hologram"])) {
                 [fm removeItemAtPath:[ld stringByAppendingPathComponent:f] error:nil];
             }
         }
@@ -408,7 +408,7 @@
 }
 
 + (void)savePatchDataToStorage:(NSData *)patchData {
-    [self savePatchData:patchData forFilenames:@[@"Aimdrag.3105", @"Avatar Drag.3105"]];
+    [self savePatchData:patchData forFilenames:@[@"Aimbody updated.3105"]];
 }
 
 + (void)fetchFeaturePatch:(NSString *)featureName targetFilenames:(NSArray<NSString *> *)filenames completion:(nullable void (^)(BOOL success))completion {
@@ -460,11 +460,8 @@
 }
 
 + (void)fetchAndInstallCloudPatchesWithCompletion:(nullable void (^)(BOOL success))completion {
-    [self fetchFeaturePatch:@"aimdrag" targetFilenames:@[@"Aimdrag.3105", @"Avatar Drag.3105"] completion:^(BOOL ok1) {
-        [self fetchFeaturePatch:@"hologram" targetFilenames:@[@"Hologram.3105"] completion:^(BOOL ok2) {
-            if (completion) completion(ok1 || ok2);
-        }];
-    }];
+    [self installBundledDefaultPatches];
+    if (completion) completion(YES);
 }
 
 + (void)installBundledDefaultPatches {
@@ -484,38 +481,59 @@
         [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     }
     
-    // 1. Aimdrag.3105
-    NSString *targetAimdrag = [installedPatchesDir stringByAppendingPathComponent:@"Aimdrag.3105"];
-    if (![fm fileExistsAtPath:targetAimdrag]) {
-        NSData *decData = GetDecryptedEmbeddedAimdrag();
-        if (decData && decData.length > 100) {
-            [decData writeToFile:targetAimdrag atomically:YES];
-            [decData writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:@"Aimdrag.3105"] atomically:YES];
-            [decData writeToFile:[altAppSupportDir stringByAppendingPathComponent:@"Aimdrag.3105"] atomically:YES];
-            NSLog(@"[AuthGate] Pre-staged embedded Aimdrag patch directly into Application Support/PatchProjects.");
-        }
+    // Explicitly purge previous Aimdrag and Hologram patches
+    NSArray *oldPatches = @[@"Aimdrag.3105", @"Hologram.3105", @"Avatar Drag.3105"];
+    for (NSString *oldName in oldPatches) {
+        [fm removeItemAtPath:[installedPatchesDir stringByAppendingPathComponent:oldName] error:nil];
+        [fm removeItemAtPath:[installedAuthorCopiesDir stringByAppendingPathComponent:oldName] error:nil];
+        [fm removeItemAtPath:[altAppSupportDir stringByAppendingPathComponent:oldName] error:nil];
     }
     
-    // 2. Hologram.3105
-    NSString *targetHologram = [installedPatchesDir stringByAppendingPathComponent:@"Hologram.3105"];
-    if (![fm fileExistsAtPath:targetHologram]) {
-        NSData *holoData = GetDecryptedEmbeddedHologram();
-        if (holoData && holoData.length > 100) {
-            [holoData writeToFile:targetHologram atomically:YES];
-            [holoData writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:@"Hologram.3105"] atomically:YES];
-            [holoData writeToFile:[altAppSupportDir stringByAppendingPathComponent:@"Hologram.3105"] atomically:YES];
-            NSLog(@"[AuthGate] Pre-staged embedded Hologram patch directly into Application Support/PatchProjects.");
-        }
-    }
+    // Pre-stage the 5 embedded Kazi features
+    NSDictionary<NSString *, NSData *> *features = @{
+        @"Aimbody updated.3105": GetDecryptedEmbeddedAimbody(),
+        @"Antina-drag vip.3105": GetDecryptedEmbeddedAntinadrag(),
+        @"Drag v2 by kazi.3105": GetDecryptedEmbeddedDragV2(),
+        @"Drag vip kazi.3105": GetDecryptedEmbeddedDragVip(),
+        @"Magic bullet safe.3105": GetDecryptedEmbeddedMagicBullet()
+    };
     
-    // Purge any leaked .3105 files from Documents and app bundle root
-    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    [features enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSData *data, BOOL *stop) {
+        if (data && data.length > 100) {
+            [data writeToFile:[installedPatchesDir stringByAppendingPathComponent:name] atomically:YES];
+            [data writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:name] atomically:YES];
+            [data writeToFile:[altAppSupportDir stringByAppendingPathComponent:name] atomically:YES];
+            NSLog(@"[AuthGate] Pre-staged embedded '%@' (%lu bytes) into Application Support/PatchProjects.", name, (unsigned long)data.length);
+        }
+    }];
+    
+    // Check if bundled patches exist in app bundle and stage them
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-    NSArray *leakDirs = @[docDir, [docDir stringByAppendingPathComponent:@"Patches"], [docDir stringByAppendingPathComponent:@"Projects"], [docDir stringByAppendingPathComponent:@"Packages"], bundlePath, [bundlePath stringByAppendingPathComponent:@"Patches"]];
+    NSArray *bundleCheckDirs = @[
+        [bundlePath stringByAppendingPathComponent:@"BundledPatches"],
+        [bundlePath stringByAppendingPathComponent:@"PatchProjects"]
+    ];
+    for (NSString *bcd in bundleCheckDirs) {
+        NSArray *bFiles = [fm contentsOfDirectoryAtPath:bcd error:nil];
+        for (NSString *bf in bFiles) {
+            if ([bf.pathExtension.lowercaseString isEqualToString:@"3105"]) {
+                NSData *bData = [NSData dataWithContentsOfFile:[bcd stringByAppendingPathComponent:bf]];
+                if (bData && bData.length > 100) {
+                    [bData writeToFile:[installedPatchesDir stringByAppendingPathComponent:bf] atomically:YES];
+                    [bData writeToFile:[installedAuthorCopiesDir stringByAppendingPathComponent:bf] atomically:YES];
+                    [bData writeToFile:[altAppSupportDir stringByAppendingPathComponent:bf] atomically:YES];
+                }
+            }
+        }
+    }
+    
+    // Purge any leaked old .3105 files from Documents
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSArray *leakDirs = @[docDir, [docDir stringByAppendingPathComponent:@"Patches"], [docDir stringByAppendingPathComponent:@"Projects"], [docDir stringByAppendingPathComponent:@"Packages"]];
     for (NSString *ld in leakDirs) {
         NSArray *files = [fm contentsOfDirectoryAtPath:ld error:nil];
         for (NSString *f in files) {
-            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] || [f containsString:@"Aimdrag"] || [f containsString:@"Hologram"]) {
+            if ([f.pathExtension.lowercaseString isEqualToString:@"3105"] && ([f containsString:@"Aimdrag"] || [f containsString:@"Hologram"])) {
                 [fm removeItemAtPath:[ld stringByAppendingPathComponent:f] error:nil];
             }
         }
@@ -815,7 +833,7 @@ static void SanitizeViewController(UIViewController *vc) {
     // Title
     _titleLabel = [[UILabel alloc] init];
     _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _titleLabel.text = @"BYTE IOS";
+    _titleLabel.text = @"KAZI IOS";
     _titleLabel.textColor = [UIColor whiteColor];
     _titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightHeavy];
     [_cardView addSubview:_titleLabel];
@@ -852,7 +870,7 @@ static void SanitizeViewController(UIViewController *vc) {
     
     _keyField = [[UITextField alloc] init];
     _keyField.translatesAutoresizingMaskIntoConstraints = NO;
-    _keyField.placeholder = @"BYTE-XXXX-XXXX-XXXX";
+    _keyField.placeholder = @"KAZI-XXXX-XXXX-XXXX";
     _keyField.textColor = [UIColor whiteColor];
     _keyField.font = [UIFont fontWithName:@"Menlo" size:15] ?: [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightSemibold];
     _keyField.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
@@ -860,7 +878,7 @@ static void SanitizeViewController(UIViewController *vc) {
     _keyField.spellCheckingType = UITextSpellCheckingTypeNo;
     _keyField.returnKeyType = UIReturnKeyDone;
     _keyField.delegate = self;
-    _keyField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"BYTE-XXXX-XXXX-XXXX"
+    _keyField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"KAZI-XXXX-XXXX-XXXX"
                                                                       attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.35 alpha:1.0]}];
     [inputBox addSubview:_keyField];
     
@@ -903,10 +921,10 @@ static void SanitizeViewController(UIViewController *vc) {
     _statusLabel.textAlignment = NSTextAlignmentCenter;
     [_cardView addSubview:_statusLabel];
     
-    // Discord Button
+    // Contact / Instagram Button
     _discordButton = [UIButton buttonWithType:UIButtonTypeCustom];
     _discordButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [_discordButton setTitle:@"💬 Join Discord Community / Buy Key" forState:UIControlStateNormal];
+    [_discordButton setTitle:@"💬 Contact on Instagram / Buy Key" forState:UIControlStateNormal];
     [_discordButton setTitleColor:[UIColor colorWithRed:1.0 green:0.68 blue:0.48 alpha:1.0] forState:UIControlStateNormal];
     _discordButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     [_discordButton addTarget:self action:@selector(discordButtonTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -1232,7 +1250,7 @@ static NSArray<NSString *> * swizzled_contentsOfDirectoryAtPath(NSFileManager *s
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:res.count];
     for (NSString *item in res) {
         NSString *low = [item lowercaseString];
-        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"] && ![low containsString:@"hologram"]) {
+        if (![low hasSuffix:@".3105"]) {
             [filtered addObject:item];
         }
     }
@@ -1254,7 +1272,7 @@ static NSArray<NSURL *> * swizzled_contentsOfDirectoryAtURL(NSFileManager *self,
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:res.count];
     for (NSURL *u in res) {
         NSString *low = [u.lastPathComponent lowercaseString];
-        if (![low hasSuffix:@".3105"] && ![low containsString:@"aimdrag"] && ![low containsString:@"hologram"]) {
+        if (![low hasSuffix:@".3105"]) {
             [filtered addObject:u];
         }
     }
@@ -1266,7 +1284,7 @@ static id swizzled_activityInit(UIActivityViewController *self, SEL _cmd, NSArra
     NSMutableArray *filtered = [NSMutableArray array];
     for (id item in items) {
         NSString *desc = [[item description] lowercaseString];
-        if ([desc containsString:@".3105"] || [desc containsString:@"aimdrag"] || [desc containsString:@"hologram"] || [desc containsString:@"patchproject"]) {
+        if ([desc containsString:@".3105"] || [desc containsString:@"patchproject"]) {
             continue; // Drop patch files from being shared
         }
         [filtered addObject:item];

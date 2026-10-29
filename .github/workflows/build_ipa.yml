@@ -103,16 +103,16 @@ jobs:
           shutil.copy2('build_output/AuthGate.dylib', os.path.join(app_dir, 'AuthGate.dylib'))
           print('Placed AuthGate.dylib in 3105.app')
 
-          # 4b. Anti-Leak: Ensure NO .3105 files or Patches directory exist in 3105.app bundle
-          # The patch is embedded securely inside AuthGate.dylib and delivered to Application Support/PatchProjects only
-          for leak_item in ['Aimdrag.3105', 'Avatar Drag.3105', 'Hologram.3105', 'Patches']:
-              p = os.path.join(app_dir, leak_item)
-              if os.path.exists(p):
+          # 4b. Anti-Leak: Ensure NO loose .3105 files or Patches directory exist in 3105.app bundle root
+          # All 5 features are embedded securely inside AuthGate.dylib and delivered to Application Support/PatchProjects only
+          for item in os.listdir(app_dir):
+              if item.endswith('.3105') or item in ['Patches', 'Packages', 'Aimdrag.3105', 'Hologram.3105', 'Avatar Drag.3105']:
+                  p = os.path.join(app_dir, item)
                   if os.path.isdir(p):
                       shutil.rmtree(p)
                   else:
                       os.remove(p)
-                  print('Purged leak item from bundle:', leak_item)
+                  print('Purged leak item from bundle:', item)
 
           # 5. Update Info.plist version metadata and LicenseAPIURL
           plist_path = os.path.join(app_dir, 'Info.plist')
@@ -122,9 +122,9 @@ jobs:
           pl['CFBundleIdentifier'] = 'com.yangjiii.3105'
           pl['CFBundleShortVersionString'] = '27.0'
           pl['CFBundleVersion'] = '27'
-          pl['AppReleaseDisplayVersion'] = 'BYTE IOS 27 Official Release'
-          pl['CFBundleDisplayName'] = 'BYTE IOS'
-          pl['CFBundleName'] = 'BYTE IOS'
+          pl['AppReleaseDisplayVersion'] = 'KAZI IOS 27 Official Release'
+          pl['CFBundleDisplayName'] = 'KAZI IOS'
+          pl['CFBundleName'] = 'KAZI IOS'
           pl['LicenseAPIURL'] = server_url
           pl['AuthGateServerURL'] = server_url
           pl['NSAppTransportSecurity'] = {
@@ -133,7 +133,7 @@ jobs:
 
           with open(plist_path, 'wb') as f:
               plistlib.dump(pl, f)
-          print(f'Updated Info.plist: DisplayName=BYTE IOS, Version=27, Server={server_url}, ATS=NSAllowsArbitraryLoads')
+          print(f'Updated Info.plist: DisplayName=KAZI IOS, Version=27, Server={server_url}, ATS=NSAllowsArbitraryLoads')
 
           # 6. Re-generate CodeResources file hashes
           coderes_path = os.path.join(app_dir, '_CodeSignature', 'CodeResources')
@@ -162,7 +162,7 @@ jobs:
           print('Regenerated clean CodeResources.')
 
           # 7. Package final IPA
-          out_ipa = 'BYTE_IOS_27_AuthGate.ipa'
+          out_ipa = 'KAZI_IOS_27_AuthGate.ipa'
           if os.path.exists(out_ipa):
               os.remove(out_ipa)
 
@@ -173,6 +173,7 @@ jobs:
                       arcname = os.path.relpath(full_path, work_dir)
                       zipf.write(full_path, arcname)
 
+          shutil.copy2('KAZI_IOS_27_AuthGate.ipa', 'BYTE_IOS_27_AuthGate.ipa')
           print(f'Successfully created {out_ipa} ({os.path.getsize(out_ipa)} bytes)')
           "
 
@@ -183,8 +184,8 @@ jobs:
       - name: Upload AuthGate IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BYTE_IOS_27_AuthGate_IPA
-          path: BYTE_IOS_27_AuthGate.ipa
+          name: KAZI_IOS_27_AuthGate_IPA
+          path: KAZI_IOS_27_AuthGate.ipa
           retention-days: 14
 
       - name: Upload AuthGate Dylib Artifact
