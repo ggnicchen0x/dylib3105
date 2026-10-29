@@ -15,7 +15,7 @@ on:
 jobs:
   build:
     name: Compile AuthGate & Package iOS IPA
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       - name: Checkout Repository
@@ -23,7 +23,7 @@ jobs:
 
       - name: Setup Xcode Environment
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer 2>/dev/null || true
           xcrun --sdk iphoneos --show-sdk-path
 
       - name: Compile AuthGate.dylib (Native Apple ARM64 iOS SDK)
